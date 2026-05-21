@@ -17,6 +17,9 @@ from typing import Dict, Tuple
 # Layout adalah mapping (col, row) → tipe sel
 Layout = Dict[Tuple[int, int], int]
 
+# ChairDirections adalah mapping (col, row) → arah hadap ("up"/"down"/"left"/"right")
+ChairDirections = Dict[Tuple[int, int], str]
+
 
 # =============================================================================
 # TIPE SEL GRID EDITOR
@@ -25,6 +28,22 @@ Layout = Dict[Tuple[int, int], int]
 CELL_EMPTY    = 0   # Sel kosong / lantai
 CELL_CHAIR    = 1   # Kursi
 CELL_OBSTACLE = 2   # Tiang / pot / halangan
+CELL_DOOR     = 3   # Pintu masuk pelanggan
+
+
+# =============================================================================
+# ARAH HADAP KURSI
+# =============================================================================
+
+CHAIR_DIRECTIONS = ["up", "right", "down", "left"]
+
+# Vektor arah untuk raycasting sorot mata
+CHAIR_DIR_VECTORS: Dict[str, Tuple[int, int]] = {
+    "up"   : ( 0, -1),   # y berkurang (ke atas)
+    "down" : ( 0,  1),   # y bertambah (ke bawah)
+    "left" : (-1,  0),   # x berkurang (ke kiri)
+    "right": ( 1,  0),   # x bertambah (ke kanan)
+}
 
 
 # =============================================================================
@@ -35,18 +54,29 @@ CELL_COLOR: Dict[int, str] = {
     CELL_EMPTY   : "#16213e",   # Biru gelap (lantai)
     CELL_CHAIR   : "#0f3460",   # Biru tua (kursi)
     CELL_OBSTACLE: "#4a4a6a",   # Abu ungu (halangan)
+    CELL_DOOR    : "#2d6a4f",   # Hijau tua (pintu masuk)
 }
 
 CELL_BORDER: Dict[int, str] = {
     CELL_EMPTY   : "#252545",
     CELL_CHAIR   : "#1a4a8a",
     CELL_OBSTACLE: "#6a6a9a",
+    CELL_DOOR    : "#52b788",
 }
 
 CELL_EMOJI: Dict[int, str] = {
     CELL_EMPTY   : "",
     CELL_CHAIR   : "🪑",
     CELL_OBSTACLE: "🧱",
+    CELL_DOOR    : "🚪",
+}
+
+# Emoji arah panah untuk kursi di editor
+CHAIR_DIR_EMOJI: Dict[str, str] = {
+    "up"   : "⬆️",
+    "down" : "⬇️",
+    "left" : "⬅️",
+    "right": "➡️",
 }
 
 
@@ -63,4 +93,5 @@ SIM_COLOR: Dict[str, str] = {
     "customer_sit"  : "#f5a623",   # Oranye (duduk)
     "gaze_floor"    : "#00ff9f",   # Hijau neon (sorot lantai)
     "gaze_obstacle" : "#ff6b35",   # Oranye terang (sorot tiang)
+    "door"          : "#52b788",   # Hijau (pintu masuk)
 }

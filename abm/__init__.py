@@ -5,10 +5,10 @@ Public API paket `abm`.
 
 Import dari sini untuk mendapatkan semua kelas yang dibutuhkan:
 
-    from abm import WaitingRoomModel, CustomerAgent, ChairAgent, ObstacleAgent
+    from abm import WaitingRoomModel, CustomerAgent, ChairAgent, ObstacleAgent, DoorAgent
 """
 
-from abm.agents import ChairAgent, CustomerAgent, CustomerStatus, ObstacleAgent
+from abm.agents import ChairAgent, CustomerAgent, CustomerStatus, DoorAgent, ObstacleAgent
 from abm.model import WaitingRoomModel
 
 __all__ = [
@@ -16,5 +16,6 @@ __all__ = [
     "CustomerAgent",
     "CustomerStatus",
     "ChairAgent",
+    "DoorAgent",
     "ObstacleAgent",
 ]
