@@ -319,18 +319,22 @@ def panel_simulate(cfg: dict) -> None:
             f"Total arrivals: {model.total_customers}."
         )
     else:
-        render_static()
-        if st.session_state.step_count > 0:
-            ph_info.caption(
-                f"Paused at step {st.session_state.step_count}. Press Start to resume."
-            )
+        # Check jika model belum di-initialize sebelum render
+        if st.session_state.model is not None:
+            render_static()
+            if st.session_state.step_count > 0:
+                ph_info.caption(
+                    f"Paused at step {st.session_state.step_count}. Press Start to resume."
+                )
+            else:
+                ph_info.caption("Press Start to begin the simulation.")
         else:
-            ph_info.caption("Press Start to begin the simulation.")
-
+            ph_info.caption("⚠️ Model belum di-initialize. Tekan **▶ Mulai** untuk memulai simulasi.")
 
 def _handle_controls(cfg, width, height, layout):
     chair_dirs = get_chair_directions()
     door_probs = st.session_state.get("door_probs", {})
+    
 
     def _new_model():
         return WaitingRoomModel(
