@@ -52,6 +52,10 @@ SPEED_M_PER_S = 1.0
 SPEED_PX_PER_S = SPEED_M_PER_S * PX_PER_METER
 
 DEFAULT_DT_S = 0.1
+DEFAULT_FPSTEP = 10  # Default frames per step
+# Speed variation: berapa persen deviasi dari base speed (normal distribution)
+# Contoh: 0.2 = 20% deviasi, jadi agent speed berkisar 0.8x - 1.2x dari base
+SPEED_VARIATION = 0.2  # 20% variation
 ARRIVE_THRESHOLD_PX = CELL_SIZE_PX * 0.35
 
 

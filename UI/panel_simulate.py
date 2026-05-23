@@ -254,11 +254,10 @@ def panel_simulate(cfg: dict) -> None:
 
                     # Render jika: ini saatnya render (sub >= next_render_at)
                     # DAN (masih ada cukup budget ATAU ini sub-step terakhir)
-                    should_render = (sub >= next_render_at) and (
-                        remaining_budget >= render_cost * 0.5
-                        or sub == fps_step - 1
-                    )
-
+                    # BARU - Render lebih sering untuk smooth motion
+                    # Render setiap 2 frame, atau minimal di frame terakhir
+                    render_interval = max(1, fps_step // 5)  # ~5 render per step
+                    should_render = (sub % render_interval == 0) or (sub == fps_step - 1)
                     if should_render:
                         render_start = time.perf_counter()
 
@@ -343,6 +342,7 @@ def _handle_controls(cfg, width, height, layout):
             arrival_rate=cfg["arrival_rate"],
             mean_sitting_s=cfg["mean_sitting"],
             pass_through_prob=cfg["pass_through_prob"],
+            fps_step=cfg["fps_step"],  # <-- TAMBAHKAN INI
             seed=cfg["seed"],
         )
 

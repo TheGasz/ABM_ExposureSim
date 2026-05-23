@@ -18,7 +18,9 @@ from constants import (
     ChairDirections,
     Layout,
     SPEED_PX_PER_S,
+    DEFAULT_FPSTEP,
     CELL_SIZE_PX,
+    SPEED_VARIATION,
 )
 from abm.agents import HumanAgent, HumanStatus
 
@@ -36,7 +38,8 @@ class WaitingRoomModel:
         arrival_rate: float = 0.6,
         mean_sitting_s: float = 20.0,
         pass_through_prob: float = 0.5,
-        speed_px_s: float = SPEED_PX_PER_S,
+        fps_step: int = 10,
+        speed_px_s: float = None,
         jitter: float = 0.25,
         stuck_threshold: int = 20,
         seed: int = 42,
@@ -48,6 +51,13 @@ class WaitingRoomModel:
         self.arrival_rate = max(0.0, arrival_rate)
         self.mean_sitting_s = max(1e-3, mean_sitting_s)
         self.pass_through_prob = min(max(pass_through_prob, 0.0), 1.0)
+        # Kalkulasi speed berdasarkan fps_step untuk konsistensi gerakan
+        if speed_px_s is None:
+    # Agar gerakan per frame selalu konsisten di semua fps_step
+    # Dengan DEFAULT_FPSTEP=10: 10 px/s × 0.1s/frame = 1 px/frame
+    # Dengan fps_step=20: 20 px/s × 0.05s/frame = 1 px/frame
+            speed_px_s = SPEED_PX_PER_S * fps_step / DEFAULT_FPSTEP
+
         self.speed_px_s = max(1e-3, speed_px_s)
         self.jitter = min(max(jitter, 0.0), 0.95)
         self.stuck_threshold = max(1, stuck_threshold)
@@ -338,13 +348,19 @@ class WaitingRoomModel:
             exit_cell = self.choose_reachable_exit(entry_cell, entry_cell, prefer_other=True)
 
         sit_duration = max(3.0, self.rng.expovariate(1.0 / self.mean_sitting_s))
+        
+        # Generate random speed untuk setiap agent
+        # Normal distribution: mean = self.speed_px_s, std_dev = SPEED_VARIATION
+        # Jadi speed berkisar antara 0.6x - 1.4x dari base speed (dengan SPEED_VARIATION=0.2)
+        speed_variation = self.np_rng.normal(loc=1.0, scale=SPEED_VARIATION)
+        individual_speed = self.speed_px_s * max(0.5, min(2.0, speed_variation))  # Clamp 0.5x - 2.0x
 
         human = HumanAgent(
             model=self,
             entry_cell=entry_cell,
             will_sit=will_sit,
             sit_duration_s=sit_duration,
-            speed_px_s=self.speed_px_s,
+            speed_px_s=individual_speed,
             chair_cell=chair_cell,
             exit_cell=exit_cell,
         )
