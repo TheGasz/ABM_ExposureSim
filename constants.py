@@ -1,97 +1,104 @@
 """
 constants.py
 ============
-Konstanta global dan alias tipe yang dipakai bersama oleh seluruh modul.
+Global constants and shared type aliases.
 
-Aturan: TIDAK ada import silang dari modul lain di sini.
-Setiap modul yang butuh konstanta cukup melakukan:
-    from constants import CELL_EMPTY, CELL_CHAIR, ...
+Rule: do not import other project modules here.
 """
 
 from typing import Dict, Tuple
 
 # =============================================================================
-# TIPE ALIAS
+# TYPE ALIASES
 # =============================================================================
 
-# Layout adalah mapping (col, row) → tipe sel
 Layout = Dict[Tuple[int, int], int]
-
-# ChairDirections adalah mapping (col, row) → arah hadap ("up"/"down"/"left"/"right")
 ChairDirections = Dict[Tuple[int, int], str]
 
 
 # =============================================================================
-# TIPE SEL GRID EDITOR
+# GRID CELL TYPES
 # =============================================================================
 
-CELL_EMPTY    = 0   # Sel kosong / lantai
-CELL_CHAIR    = 1   # Kursi
-CELL_OBSTACLE = 2   # Tiang / pot / halangan
-CELL_DOOR     = 3   # Pintu masuk pelanggan
+CELL_EMPTY = 0
+CELL_CHAIR = 1
+CELL_OBSTACLE = 2
+CELL_DOOR = 3
 
 
 # =============================================================================
-# ARAH HADAP KURSI
+# CHAIR FACING
 # =============================================================================
 
 CHAIR_DIRECTIONS = ["up", "right", "down", "left"]
 
-# Vektor arah untuk raycasting sorot mata
 CHAIR_DIR_VECTORS: Dict[str, Tuple[int, int]] = {
-    "up"   : ( 0, -1),   # y berkurang (ke atas)
-    "down" : ( 0,  1),   # y bertambah (ke bawah)
-    "left" : (-1,  0),   # x berkurang (ke kiri)
-    "right": ( 1,  0),   # x bertambah (ke kanan)
+    "up": (0, -1),
+    "down": (0, 1),
+    "left": (-1, 0),
+    "right": (1, 0),
 }
 
 
 # =============================================================================
-# PALET WARNA — EDITOR PLOTLY
+# SPATIAL UNITS
+# =============================================================================
+
+# 1 meter = 10 pixels, and 1 cell = 1 meter.
+CELL_SIZE_PX = 10
+PX_PER_METER = 10
+
+SPEED_M_PER_S = 1.0
+SPEED_PX_PER_S = SPEED_M_PER_S * PX_PER_METER
+
+DEFAULT_DT_S = 0.1
+ARRIVE_THRESHOLD_PX = CELL_SIZE_PX * 0.35
+
+
+# =============================================================================
+# COLOR PALETTE - EDITOR (PLOTLY)
 # =============================================================================
 
 CELL_COLOR: Dict[int, str] = {
-    CELL_EMPTY   : "#16213e",   # Biru gelap (lantai)
-    CELL_CHAIR   : "#0f3460",   # Biru tua (kursi)
-    CELL_OBSTACLE: "#4a4a6a",   # Abu ungu (halangan)
-    CELL_DOOR    : "#2d6a4f",   # Hijau tua (pintu masuk)
+    CELL_EMPTY: "#16213e",
+    CELL_CHAIR: "#0f3460",
+    CELL_OBSTACLE: "#4a4a6a",
+    CELL_DOOR: "#2d6a4f",
 }
 
 CELL_BORDER: Dict[int, str] = {
-    CELL_EMPTY   : "#252545",
-    CELL_CHAIR   : "#1a4a8a",
+    CELL_EMPTY: "#252545",
+    CELL_CHAIR: "#1a4a8a",
     CELL_OBSTACLE: "#6a6a9a",
-    CELL_DOOR    : "#52b788",
+    CELL_DOOR: "#52b788",
 }
 
 CELL_EMOJI: Dict[int, str] = {
-    CELL_EMPTY   : "",
-    CELL_CHAIR   : "🪑",
-    CELL_OBSTACLE: "🧱",
-    CELL_DOOR    : "🚪",
+    CELL_EMPTY: "",
+    CELL_CHAIR: "C",
+    CELL_OBSTACLE: "O",
+    CELL_DOOR: "D",
 }
 
-# Emoji arah panah untuk kursi di editor
 CHAIR_DIR_EMOJI: Dict[str, str] = {
-    "up"   : "⬆️",
-    "down" : "⬇️",
-    "left" : "⬅️",
-    "right": "➡️",
+    "up": "^",
+    "down": "v",
+    "left": "<",
+    "right": ">",
 }
 
 
 # =============================================================================
-# PALET WARNA — PLOT SIMULASI (MATPLOTLIB)
+# COLOR PALETTE - SIMULATION (MATPLOTLIB)
 # =============================================================================
 
 SIM_COLOR: Dict[str, str] = {
-    "obstacle"      : "#6a6a9a",   # Abu ungu
-    "chair_empty"   : "#0f3460",   # Biru tua
-    "chair_full"    : "#1a5a9a",   # Biru sedang
-    "customer_seek" : "#e94560",   # Merah (mencari)
-    "customer_move" : "#7ed6df",   # Biru muda (bergerak)
-    "customer_sit"  : "#f5a623",   # Oranye (duduk)
-    "gaze_floor"    : "#00ff9f",   # Hijau neon (sorot lantai)
-    "gaze_obstacle" : "#ff6b35",   # Oranye terang (sorot tiang)
-    "door"          : "#52b788",   # Hijau (pintu masuk)
+    "obstacle": "#6a6a9a",
+    "chair_empty": "#0f3460",
+    "chair_full": "#1a5a9a",
+    "door": "#52b788",
+    "human_seek": "#e94560",
+    "human_move": "#7ed6df",
+    "human_sit": "#f5a623",
+    "human_pass": "#9bdeac",
 }

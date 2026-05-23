@@ -1,254 +1,214 @@
 """
 abm/agents.py
 =============
-Definisi seluruh kelas Agent untuk simulasi ABM Ruang Tunggu.
-
-Hierarki:
-    Agent (Mesa)
-    ├── ObstacleAgent   — tiang/pot, diam, memblokir ray & bisa ditempel iklan
-    ├── DoorAgent       — pintu masuk, marker posisi spawn pelanggan
-    ├── ChairAgent      — kursi, diam, punya status kosong/terisi + arah hadap
-    └── CustomerAgent   — pelanggan, bergerak, memancarkan sorot mata (raycasting)
+Agent definitions for the waiting room simulation.
 """
 
-import heapq
 import math
-from collections import deque
 from enum import Enum
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple, TYPE_CHECKING
 
-import numpy as np
-from mesa import Agent
-
-from constants import CELL_OBSTACLE, CELL_CHAIR, CELL_DOOR, CHAIR_DIR_VECTORS
+from constants import ARRIVE_THRESHOLD_PX
 
 if TYPE_CHECKING:
     from abm.model import WaitingRoomModel
 
 
-class CustomerStatus(Enum):
-    SEEKING = "seeking"
-    MOVING  = "moving"
+class HumanStatus(Enum):
+    TO_CHAIR = "to_chair"
     SITTING = "sitting"
-    LEAVING = "leaving"
+    TO_EXIT = "to_exit"
 
 
-class ObstacleAgent(Agent):
-    """Tiang / pot / tembok pendek. Statis, memblokir ray."""
-    def __init__(self, model):
-        super().__init__(model)
-    def step(self):
-        pass
+class HumanAgent:
+    """Human agent with randomized steering and simple obstacle avoidance."""
 
+    def __init__(
+        self,
+        model: "WaitingRoomModel",
+        entry_cell: Tuple[int, int],
+        will_sit: bool,
+        sit_duration_s: float,
+        speed_px_s: float,
+        chair_cell: Optional[Tuple[int, int]] = None,
+        exit_cell: Optional[Tuple[int, int]] = None,
+    ) -> None:
+        self.model = model
+        self.entry_cell = entry_cell
+        self.will_sit = will_sit
+        self.chair_cell = chair_cell
+        self.exit_cell = exit_cell
 
-class DoorAgent(Agent):
-    """Pintu masuk ruangan. Statis, menandai spawn point."""
-    def __init__(self, model):
-        super().__init__(model)
-    def step(self):
-        pass
+        self.pos_px = model.cell_center_px(entry_cell)
+        self.status = HumanStatus.TO_CHAIR if will_sit else HumanStatus.TO_EXIT
+        self.sit_remaining_s = max(0.0, sit_duration_s)
+        self.speed_px_s = speed_px_s
 
+        self.path_cells: List[Tuple[int, int]] = []
+        self.path_idx: int = 0
+        self.path_target: Optional[Tuple[int, int]] = None
+        self.last_cell = model.cell_from_px(self.pos_px)
+        # Sel terakhir yang benar-benar dicapai (snap ke center).
+        # Dipakai sebagai start point saat replan agar tidak ada teleport
+        # ketika agen berada di posisi float antara dua sel.
+        self.last_reached_cell: Tuple[int, int] = model.cell_from_px(self.pos_px)
+        self.stuck_steps = 0
 
-class ChairAgent(Agent):
-    """Kursi dengan arah hadap (facing)."""
-    def __init__(self, model, facing: str = "right"):
-        super().__init__(model)
-        self.occupied: bool = False
-        self.occupant: Optional["CustomerAgent"] = None
-        self.facing: str = facing
+        if self.status == HumanStatus.TO_CHAIR and self.chair_cell:
+            self._plan_path(self.chair_cell)
+        elif self.exit_cell:
+            self._plan_path(self.exit_cell)
 
-    def step(self):
-        pass
+    def step(self, dt: float) -> bool:
+        """
+        Advance one simulation step.
 
+        Returns
+        -------
+        bool
+            True if the agent has exited the room.
+        """
+        if self.status == HumanStatus.TO_CHAIR:
+            if not self.chair_cell:
+                start_cell = self.last_reached_cell
+                self.chair_cell = self.model.choose_reachable_chair(start_cell)
+                if self.chair_cell:
+                    self.model.reserve_chair(self.chair_cell, self)
+                    self._plan_path(self.chair_cell)
+                else:
+                    self.status = HumanStatus.TO_EXIT
+                    self.exit_cell = self.exit_cell or self.model.choose_reachable_exit(
+                        start_cell, self.entry_cell, prefer_other=True
+                    )
+                    if self.exit_cell:
+                        self._plan_path(self.exit_cell)
+            if self.chair_cell and self._move_along_path(self.chair_cell, dt):
+                self.pos_px = self.model.cell_center_px(self.chair_cell)
+                self.last_reached_cell = self.chair_cell
+                self.status = HumanStatus.SITTING
 
-class CustomerAgent(Agent):
-    """Pelanggan: masuk, cari kursi, duduk, sorot mata, pergi."""
+        elif self.status == HumanStatus.SITTING:
+            self.sit_remaining_s -= dt
+            if self.sit_remaining_s <= 0:
+                if self.chair_cell:
+                    self.model.release_chair(self.chair_cell, self)
+                start_cell = self.last_reached_cell
+                self.exit_cell = self.exit_cell or self.model.choose_reachable_exit(
+                    start_cell, self.entry_cell, prefer_other=False
+                )
+                if self.exit_cell:
+                    self._plan_path(self.exit_cell)
+                self.status = HumanStatus.TO_EXIT
 
-    def __init__(self, model, sitting_duration: int, gaze_range: int):
-        super().__init__(model)
-        self.status = CustomerStatus.SEEKING
-        self.target_chair: Optional[ChairAgent] = None
-        self.sitting_timer = sitting_duration
-        self.gaze_range = gaze_range
-        self._path: List[Tuple[int, int]] = []
-        self._path_idx: int = 0
-        self.gaze_floor_cells: List[Tuple[int, int]] = []
-        self.gaze_obstacle_cells: List[Tuple[int, int]] = []
+        elif self.status == HumanStatus.TO_EXIT:
+            if not self.exit_cell:
+                start_cell = self.last_reached_cell
+                self.exit_cell = self.model.choose_reachable_exit(
+                    start_cell, self.entry_cell, prefer_other=True
+                )
+                if self.exit_cell:
+                    self._plan_path(self.exit_cell)
+            if self.exit_cell and self._move_along_path(self.exit_cell, dt):
+                return True
 
-    # -- Navigation helpers --
+        self._update_stuck_state()
+        self._recover_if_stuck()
+        return False
 
-    def _is_walkable(self, pos):
-        grid = self.model.grid
-        if not (0 <= pos[0] < grid.width and 0 <= pos[1] < grid.height):
-            return False
-        contents = grid.get_cell_list_contents([pos])
-        return not any(isinstance(a, ObstacleAgent) for a in contents)
-
-    def _can_move_diagonal(self, x, y, dx, dy):
-        if dx == 0 or dy == 0:
-            return True
-        a_blocked = not self._is_walkable((x + dx, y))
-        b_blocked = not self._is_walkable((x, y + dy))
-        return not (a_blocked and b_blocked)
-
-    def _find_path(self, start, goal):
-        """A* pathfinding menghindari obstacle, cek diagonal gap."""
-        grid = self.model.grid
-
-        def h(a, b):
-            return max(abs(a[0]-b[0]), abs(a[1]-b[1]))
-
-        open_set = [(0, start)]
-        came_from = {}
-        g_score = {start: 0}
-
-        while open_set:
-            _, current = heapq.heappop(open_set)
-            if current == goal:
-                path = [current]
-                while current in came_from:
-                    current = came_from[current]
-                    path.append(current)
-                path.reverse()
-                return path
-
-            cx, cy = current
-            for nb in grid.get_neighborhood(current, moore=True, include_center=False):
-                nx, ny = nb
-                ddx, ddy = nx - cx, ny - cy
-                if not self._is_walkable(nb) and nb != goal:
-                    continue
-                if not self._can_move_diagonal(cx, cy, ddx, ddy):
-                    continue
-                cost = 1.414 if (ddx != 0 and ddy != 0) else 1.0
-                tg = g_score[current] + cost
-                if tg < g_score.get(nb, float('inf')):
-                    came_from[nb] = current
-                    g_score[nb] = tg
-                    heapq.heappush(open_set, (tg + h(nb, goal), nb))
-        return []
-
-    def _find_nearest_empty_chair(self):
-        """BFS + A* untuk menemukan kursi kosong terdekat yang reachable."""
-        grid = self.model.grid
-        visited = {self.pos}
-        queue = deque([self.pos])
-        while queue:
-            cur = queue.popleft()
-            for agent in grid.get_cell_list_contents([cur]):
-                if isinstance(agent, ChairAgent) and not agent.occupied:
-                    path = self._find_path(self.pos, agent.pos)
-                    if path:
-                        self._path = path
-                        self._path_idx = 1
-                        return agent
-            for nb in grid.get_neighborhood(cur, moore=True, include_center=False):
-                if nb not in visited and self._is_walkable(nb):
-                    visited.add(nb)
-                    queue.append(nb)
-        return None
-
-    def _step_toward(self, target):
-        """Gerak satu langkah mengikuti path A*."""
-        if self._path and self._path_idx < len(self._path):
-            next_pos = self._path[self._path_idx]
-            contents = self.model.grid.get_cell_list_contents([next_pos])
-            is_target = self.target_chair and next_pos == self.target_chair.pos
-            has_cust = any(isinstance(a, CustomerAgent) and a is not self for a in contents)
-            if is_target or (self._is_walkable(next_pos) and not has_cust):
-                self.model.grid.move_agent(self, next_pos)
-                self._path_idx += 1
-                return
-            return  # Tunggu jika terblokir customer
-
-        # Fallback: hitung path baru
-        new_path = self._find_path(self.pos, target)
-        if new_path and len(new_path) > 1:
-            self._path = new_path
-            self._path_idx = 1
-            self._step_toward(target)
-
-    # -- Raycasting --
-
-    def _cast_gaze(self):
-        """Pancarkan 3 ray sorot mata mengikuti arah hadap kursi."""
-        self.gaze_floor_cells = []
-        self.gaze_obstacle_cells = []
-        ax, ay = self.pos
-
-        if self.target_chair and hasattr(self.target_chair, 'facing'):
-            dir_vec = CHAIR_DIR_VECTORS.get(self.target_chair.facing, (1, 0))
-            dx_main, dy_main = float(dir_vec[0]), float(dir_vec[1])
+    def _update_stuck_state(self) -> None:
+        cell = self.model.cell_from_px(self.pos_px)
+        if cell == self.last_cell:
+            self.stuck_steps += 1
         else:
-            cx = self.model.grid.width // 2
-            cy = self.model.grid.height // 2
-            dx_main = float(cx - ax)
-            dy_main = float(cy - ay)
-            length = math.hypot(dx_main, dy_main)
-            if length < 1e-9:
+            self.stuck_steps = 0
+            self.last_cell = cell
+
+    def _recover_if_stuck(self) -> None:
+        if self.stuck_steps < self.model.stuck_threshold:
+            return
+        self.stuck_steps = 0
+        start_cell = self.last_reached_cell
+
+        if self.status == HumanStatus.TO_CHAIR:
+            new_chair = self.model.choose_reachable_chair(start_cell, exclude=self.chair_cell)
+            if new_chair:
+                if self.chair_cell:
+                    self.model.release_chair(self.chair_cell, self)
+                self.chair_cell = new_chair
+                self.model.reserve_chair(new_chair, self)
+                self._plan_path(new_chair)
                 return
-            dx_main /= length
-            dy_main /= length
 
-        for angle_deg in [-45, 0, 45]:
-            rad = math.radians(angle_deg)
-            cos_a, sin_a = math.cos(rad), math.sin(rad)
-            rdx = dx_main * cos_a - dy_main * sin_a
-            rdy = dx_main * sin_a + dy_main * cos_a
-            self._trace_ray(ax, ay, rdx, rdy)
+            if self.chair_cell:
+                self.model.release_chair(self.chair_cell, self)
+                self.chair_cell = None
+            self.status = HumanStatus.TO_EXIT
+            self.exit_cell = self.model.choose_reachable_exit(
+                start_cell, self.entry_cell, prefer_other=True, exclude=self.exit_cell
+            )
+            if self.exit_cell:
+                self._plan_path(self.exit_cell)
+            return
 
-    def _trace_ray(self, ox, oy, dx, dy):
-        """Telusuri satu ray, update heatmap."""
-        grid = self.model.grid
-        f_heat = self.model.floor_heatmap
-        o_heat = self.model.obstacle_heatmap
-        prev = (-9999, -9999)
+        if self.exit_cell and self._plan_path(self.exit_cell):
+            return
 
-        for i in range(1, self.gaze_range + 1):
-            nx = int(round(ox + dx * i))
-            ny = int(round(oy + dy * i))
-            if not (0 <= nx < grid.width and 0 <= ny < grid.height):
-                break
-            cell = (nx, ny)
-            if cell == prev:
+        self.exit_cell = self.model.choose_reachable_exit(
+            start_cell, self.entry_cell, prefer_other=True, exclude=self.exit_cell
+        )
+        if self.exit_cell:
+            self._plan_path(self.exit_cell)
+
+    def _plan_path(self, target_cell: Tuple[int, int]) -> bool:
+        # Gunakan last_reached_cell (sel yang benar-benar sudah di-snap ke
+        # center-nya) sebagai titik start, bukan cell_from_px(pos_px).
+        # Ini mencegah teleport ketika agen berada di posisi float antara
+        # dua sel saat path di-replan (misalnya di awal frame baru dengan
+        # fps_step tinggi).
+        start_cell = self.last_reached_cell
+        path = self.model.find_path(start_cell, target_cell)
+        if not path:
+            # Fallback: coba dari sel float saat ini
+            start_cell = self.model.cell_from_px(self.pos_px)
+            path = self.model.find_path(start_cell, target_cell)
+        if not path:
+            return False
+        self.path_cells = path
+        self.path_idx = 0
+        self.path_target = target_cell
+        return True
+
+    def _move_along_path(self, target_cell: Tuple[int, int], dt: float) -> bool:
+        if self.path_target != target_cell or not self.path_cells:
+            if not self._plan_path(target_cell):
+                return False
+
+        remaining = self.speed_px_s * dt
+        while remaining > 0 and self.path_idx < len(self.path_cells):
+            next_cell = self.path_cells[self.path_idx]
+            next_px = self.model.cell_center_px(next_cell)
+            dx = next_px[0] - self.pos_px[0]
+            dy = next_px[1] - self.pos_px[1]
+            dist = math.hypot(dx, dy)
+
+            if dist <= ARRIVE_THRESHOLD_PX:
+                self.pos_px = next_px
+                # Catat sel ini sebagai yang terakhir benar-benar dicapai
+                self.last_reached_cell = next_cell
+                self.path_idx += 1
                 continue
-            prev = cell
-            contents = grid.get_cell_list_contents([cell])
-            if any(isinstance(a, ObstacleAgent) for a in contents):
-                o_heat[nx][ny] += 1
-                self.gaze_obstacle_cells.append(cell)
-                break
-            f_heat[nx][ny] += 1
-            self.gaze_floor_cells.append(cell)
 
-    # -- Step utama --
-
-    def step(self):
-        if self.status == CustomerStatus.SEEKING:
-            chair = self._find_nearest_empty_chair()
-            if chair:
-                self.target_chair = chair
-                chair.occupied = True
-                chair.occupant = self
-                self.status = CustomerStatus.MOVING
-
-        elif self.status == CustomerStatus.MOVING:
-            if self.pos == self.target_chair.pos:
-                self.status = CustomerStatus.SITTING
+            if dist > remaining:
+                ratio = remaining / dist
+                candidate = (self.pos_px[0] + dx * ratio, self.pos_px[1] + dy * ratio)
+                if self.model.is_walkable_pos(candidate, target_cell):
+                    self.pos_px = candidate
+                remaining = 0.0
             else:
-                self._step_toward(self.target_chair.pos)
+                self.pos_px = next_px
+                # Catat sel ini sebagai yang terakhir benar-benar dicapai
+                self.last_reached_cell = next_cell
+                remaining -= dist
+                self.path_idx += 1
 
-        elif self.status == CustomerStatus.SITTING:
-            self._cast_gaze()
-            self.sitting_timer -= 1
-            if self.sitting_timer <= 0:
-                if self.target_chair:
-                    self.target_chair.occupied = False
-                    self.target_chair.occupant = None
-                self.status = CustomerStatus.LEAVING
-                self.gaze_floor_cells = []
-                self.gaze_obstacle_cells = []
-
-        elif self.status == CustomerStatus.LEAVING:
-            self.model.grid.remove_agent(self)
-            self.remove()
+        return self.path_idx >= len(self.path_cells)

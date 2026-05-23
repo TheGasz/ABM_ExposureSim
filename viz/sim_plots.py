@@ -1,192 +1,225 @@
 """
 viz/sim_plots.py
 ================
-Fungsi visualisasi matplotlib untuk panel simulasi.
+Matplotlib plots for the simulation view.
 
-Dua fungsi utama:
-    plot_sim_room()      → Figure kondisi ruangan real-time
-    plot_dual_heatmap()  → Figure dua heatmap akumulatif (floor + obstacle)
+Optimasi: pisahkan static layer (obstacles, chairs, doors) dari dynamic layer
+(posisi agen). Static layer di-render sekali ke background image, dynamic layer
+di-update in-place pada axes yang sama — menghindari pembuatan figure baru
+setiap frame sehingga animasi bisa berjalan lancar di fps tinggi.
 """
 
-from typing import Dict, List, Set, Tuple
+import io
+
+import numpy as np
+from typing import List, Optional, Tuple
 
 import matplotlib.pyplot as plt
-import numpy as np
-import seaborn as sns
+from matplotlib.collections import PathCollection
+from matplotlib.patches import Rectangle
 
-from constants import CELL_OBSTACLE, Layout, SIM_COLOR, CHAIR_DIR_VECTORS
+from constants import SIM_COLOR
 
 
-def plot_sim_room(snap: dict, width: int, height: int) -> plt.Figure:
-    """Render kondisi ruangan simulasi pada satu step tertentu."""
+class SimRenderer:
+    """
+    Renderer yang reuse figure/axes yang sama antar frame.
+
+    Alur:
+    1. Buat instance sekali saat simulasi dimulai.
+    2. Panggil render(snap) setiap frame → kembalikan PNG bytes.
+    3. Tampilkan dengan st.image(bytes, ...) — lebih cepat dari st.pyplot.
+    """
+
+    def __init__(self, width: int, height: int, cell_size_px: int) -> None:
+        self.width = width
+        self.height = height
+        self.cell_size_px = cell_size_px
+
+        self.fig, self.ax = plt.subplots(figsize=(8, 6))
+        self.fig.patch.set_facecolor("#0d0d1a")
+        self.ax.set_facecolor("#1a1a2e")
+
+        w_px = width * cell_size_px
+        h_px = height * cell_size_px
+        self.ax.set_xlim(0, w_px)
+        self.ax.set_ylim(0, h_px)
+        self.ax.set_aspect("equal")
+        self.ax.invert_yaxis()
+        self.ax.set_xticks([])
+        self.ax.set_yticks([])
+        self.ax.set_title("Room State", color="white", fontsize=11, fontweight="bold")
+
+        # Scatter artists untuk dynamic layer — dibuat sekali, di-update tiap frame
+        s = (cell_size_px * 1.1) ** 2
+        self._sc_seek: PathCollection = self.ax.scatter(
+            [], [], c=SIM_COLOR["human_seek"], s=s, zorder=6,
+            label="To chair", edgecolors="none",
+        )
+        self._sc_exit: PathCollection = self.ax.scatter(
+            [], [], c=SIM_COLOR["human_move"], s=s, zorder=6,
+            label="Leaving", edgecolors="none",
+        )
+        self._sc_pass: PathCollection = self.ax.scatter(
+            [], [], c=SIM_COLOR["human_pass"], s=s, zorder=6,
+            label="Passing", edgecolors="none",
+        )
+        self._sc_sit: PathCollection = self.ax.scatter(
+            [], [], c=SIM_COLOR["human_sit"], s=s, zorder=7,
+            label="Sitting", edgecolors="none",
+        )
+
+        self.ax.legend(
+            loc="upper right", fontsize=7, framealpha=0.25,
+            facecolor="#1a1a2e", edgecolor="#444466",
+        )
+        plt.tight_layout()
+
+        # Static layer belum digambar — akan digambar saat render pertama
+        self._static_drawn = False
+
+    def _draw_static(self, snap: dict) -> None:
+        """Gambar obstacles, chairs, doors — hanya sekali per instance."""
+        cell_size_px = self.cell_size_px
+
+        def add_rect(col: int, row: int, fc: str, ec: str, alpha: float,
+                     z: int, ls: str = "solid", lw: float = 1.0) -> None:
+            self.ax.add_patch(Rectangle(
+                (col * cell_size_px, row * cell_size_px),
+                cell_size_px, cell_size_px,
+                facecolor=fc, edgecolor=ec, linewidth=lw,
+                alpha=alpha, zorder=z, linestyle=ls,
+            ))
+
+        for col, row in snap.get("obstacles", []):
+            add_rect(col, row, SIM_COLOR["obstacle"], SIM_COLOR["obstacle"], 1.0, 2)
+
+        # Chairs: gambar semua empty dulu; occupied akan di-overlay via scatter
+        all_chairs = list(snap.get("chairs_empty", [])) + list(snap.get("chairs_full", []))
+        for col, row in all_chairs:
+            add_rect(col, row, SIM_COLOR["chair_empty"], SIM_COLOR["chair_empty"], 0.9, 3)
+
+        for col, row in snap.get("doors", []):
+            add_rect(col, row, "none", SIM_COLOR["door"], 1.0, 5, ls="dashed", lw=2.0)
+
+        self._static_drawn = True
+
+    def _update_chairs(self, snap: dict) -> None:
+        """Update warna chair full/empty dengan menggambar ulang hanya patch kursi."""
+        # Hapus patch kursi lama (zorder 3 dan 4), gambar ulang
+        # Lebih mudah: simpan referensi patch kursi dan update facecolor-nya.
+        # Untuk simplisitas, gunakan scatter overlay untuk chairs_full.
+        # Chair penuh ditampilkan via scatter terpisah (zorder 4).
+        if not hasattr(self, "_sc_chairs_full"):
+            s = (self.cell_size_px * 1.3) ** 2
+            self._sc_chairs_full: PathCollection = self.ax.scatter(
+                [], [], c=SIM_COLOR["chair_full"], s=s, zorder=4,
+                marker="s", edgecolors="none",
+            )
+
+        chairs_full = snap.get("chairs_full", [])
+        if chairs_full:
+            cs = self.cell_size_px
+            xs = [col * cs + cs * 0.5 for col, row in chairs_full]
+            ys = [row * cs + cs * 0.5 for col, row in chairs_full]
+            self._sc_chairs_full.set_offsets(list(zip(xs, ys)))
+        else:
+            self._sc_chairs_full.set_offsets(np.empty((0, 2)))
+
+    @staticmethod
+    def _points_to_offsets(points: List[Tuple[float, float]]):
+        if not points:
+            return []
+        return list(points)
+
+    def render(self, snap: dict) -> bytes:
+        """
+        Update dynamic layer dan kembalikan PNG sebagai bytes.
+        Jauh lebih cepat dari membuat figure baru setiap frame.
+        """
+        if not self._static_drawn:
+            self._draw_static(snap)
+
+        self._update_chairs(snap)
+
+        # Update posisi agen — hanya set_offsets, tidak ada alokasi baru
+        def _upd(sc: PathCollection, points: List[Tuple[float, float]]) -> None:
+            if points:
+                sc.set_offsets(points)
+                sc.set_visible(True)
+            else:
+                sc.set_offsets(np.empty((0, 2)))
+                sc.set_visible(False)
+
+        _upd(self._sc_seek, snap.get("humans_seek", []))
+        _upd(self._sc_exit, snap.get("humans_exit", []))
+        _upd(self._sc_pass, snap.get("humans_pass", []))
+        _upd(self._sc_sit,  snap.get("humans_sit",  []))
+
+        buf = io.BytesIO()
+        self.fig.savefig(buf, format="png", dpi=90, bbox_inches="tight")
+        buf.seek(0)
+        return buf.getvalue()
+
+    def close(self) -> None:
+        plt.close(self.fig)
+
+
+# ---------------------------------------------------------------------------
+# Fungsi standalone (dipakai saat pause / render tunggal)
+# ---------------------------------------------------------------------------
+
+def plot_sim_room(snap: dict, width: int, height: int, cell_size_px: int) -> plt.Figure:
+    """Buat figure baru sekali pakai. Gunakan SimRenderer untuk animasi."""
     fig, ax = plt.subplots(figsize=(8, 6))
     fig.patch.set_facecolor("#0d0d1a")
     ax.set_facecolor("#1a1a2e")
 
-    ax.set_xlim(-0.5, width - 0.5)
-    ax.set_ylim(-0.5, height - 0.5)
-    ax.set_xticks(range(width))
-    ax.set_yticks(range(height))
-    ax.tick_params(colors="#444466", labelsize=5)
-    ax.grid(color="#252545", linewidth=0.4, zorder=0)
+    w_px = width * cell_size_px
+    h_px = height * cell_size_px
+    ax.set_xlim(0, w_px)
+    ax.set_ylim(0, h_px)
     ax.set_aspect("equal")
     ax.invert_yaxis()
+    ax.set_xticks([])
+    ax.set_yticks([])
 
-    def scatter(coords, color, marker, size, zorder, alpha=1.0, label=None):
-        if not coords:
+    def draw_cells(cells, color, edge, alpha, z):
+        for col, row in cells:
+            ax.add_patch(Rectangle(
+                (col * cell_size_px, row * cell_size_px),
+                cell_size_px, cell_size_px,
+                facecolor=color, edgecolor=edge,
+                linewidth=1.0, alpha=alpha, zorder=z,
+            ))
+
+    draw_cells(snap.get("obstacles", []),    SIM_COLOR["obstacle"],    SIM_COLOR["obstacle"],    1.0, 2)
+    draw_cells(snap.get("chairs_empty", []), SIM_COLOR["chair_empty"], SIM_COLOR["chair_empty"], 0.9, 3)
+    draw_cells(snap.get("chairs_full", []),  SIM_COLOR["chair_full"],  SIM_COLOR["chair_full"],  1.0, 4)
+
+    for col, row in snap.get("doors", []):
+        ax.add_patch(Rectangle(
+            (col * cell_size_px, row * cell_size_px),
+            cell_size_px, cell_size_px,
+            facecolor="none", edgecolor=SIM_COLOR["door"],
+            linewidth=2.0, linestyle="--", zorder=5,
+        ))
+
+    s = (cell_size_px * 1.1) ** 2
+    def scatter_px(points, color, label, z):
+        if not points:
             return
-        xs, ys = zip(*coords)
-        ax.scatter(ys, xs, c=color, marker=marker, s=size, zorder=zorder,
-                   alpha=alpha, label=label, edgecolors="none")
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        ax.scatter(xs, ys, c=color, s=s, zorder=z, label=label, edgecolors="none")
 
-    # Layer 1: Sorot mata lantai
-    for (x, y) in snap["gaze_floor"]:
-        ax.add_patch(plt.Rectangle(
-            (y - 0.5, x - 0.5), 1, 1,
-            color=SIM_COLOR["gaze_floor"], alpha=0.13, zorder=1,
-        ))
+    scatter_px(snap.get("humans_seek", []), SIM_COLOR["human_seek"], "To chair", 6)
+    scatter_px(snap.get("humans_exit", []), SIM_COLOR["human_move"], "Leaving",  6)
+    scatter_px(snap.get("humans_pass", []), SIM_COLOR["human_pass"], "Passing",  6)
+    scatter_px(snap.get("humans_sit",  []), SIM_COLOR["human_sit"],  "Sitting",  7)
 
-    # Layer 2: Sorot mata tiang
-    for (x, y) in snap["gaze_obstacle"]:
-        ax.add_patch(plt.Rectangle(
-            (y - 0.5, x - 0.5), 1, 1,
-            color=SIM_COLOR["gaze_obstacle"], alpha=0.35, zorder=2,
-        ))
-
-    # Layer 3: Agen
-    scatter(snap["obstacles"], SIM_COLOR["obstacle"], "s", 200, 3, label="Tiang/Halangan")
-    scatter(snap.get("doors", []), SIM_COLOR["door"], "D", 180, 3, label="Pintu Masuk")
-    scatter(snap["chairs_empty"], SIM_COLOR["chair_empty"], "p", 160, 3, alpha=0.7, label="Kursi Kosong")
-    scatter(snap["chairs_full"], SIM_COLOR["chair_full"], "p", 180, 4, label="Kursi Terisi")
-    scatter(snap["customers_seek"], SIM_COLOR["customer_seek"], "o", 140, 5, label="Mencari Kursi")
-    scatter(snap["customers_move"], SIM_COLOR["customer_move"], "o", 140, 5, label="Bergerak")
-    scatter(snap["customers_sit"], SIM_COLOR["customer_sit"], "o", 170, 5, label="Duduk")
-
-    # Layer 4: Panah arah hadap kursi
-    chair_facings = snap.get("chair_facings", {})
-    for (cx, cy), facing in chair_facings.items():
-        dvec = CHAIR_DIR_VECTORS.get(facing, (1, 0))
-        ax.annotate("", xy=(cy + dvec[1] * 0.35, cx + dvec[0] * 0.35),
-                     xytext=(cy, cx),
-                     arrowprops=dict(arrowstyle="->", color="#f5a623",
-                                     lw=1.5, mutation_scale=10),
-                     zorder=6)
-
-    # Penanda pintu masuk
-    door_positions = snap.get("doors", [])
-    if door_positions:
-        for (dx, dy) in door_positions:
-            ax.add_patch(plt.Rectangle(
-                (dy - 0.5, dx - 0.5), 1, 1,
-                fill=False, edgecolor=SIM_COLOR["door"],
-                linewidth=2, linestyle="--", zorder=2,
-            ))
-    else:
-        # Fallback: garis di kolom 0
-        ax.axvline(x=-0.5, color="#f5a623", linewidth=2, linestyle=":", alpha=0.8)
-        ax.text(-0.48, height - 0.7, "PINTU",
-                color="white", fontsize=6, rotation=90, va="top",
-                bbox=dict(facecolor="#f5a623", alpha=0.7, pad=1))
-
-    ax.legend(loc="upper right", fontsize=6.5, framealpha=0.25,
-              facecolor="#1a1a2e", edgecolor="#444466", labelcolor="white")
-    ax.set_title("Kondisi Ruangan (Real-time)",
-                 color="white", fontsize=10, fontweight="bold", pad=5)
-    ax.set_xlabel("Kolom", color="#888899", fontsize=7)
-    ax.set_ylabel("Baris", color="#888899", fontsize=7)
-
+    ax.set_title("Room State", color="white", fontsize=11, fontweight="bold")
+    ax.legend(loc="upper right", fontsize=7, framealpha=0.25,
+              facecolor="#1a1a2e", edgecolor="#444466")
     plt.tight_layout()
     return fig
-
-
-def plot_dual_heatmap(
-    floor_hm: np.ndarray,
-    obstacle_hm: np.ndarray,
-    layout: Layout,
-    width: int,
-    height: int,
-) -> plt.Figure:
-    """Render dua heatmap akumulatif secara berdampingan."""
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.patch.set_facecolor("#0d0d1a")
-
-    panel_configs = [
-        {
-            "title": "🟢 Floor Exposure\n(Banner Lantai / Display Stand)",
-            "heatmap": floor_hm.T,
-            "source": floor_hm,
-            "cmap": "YlOrRd",
-            "rank_color": "cyan",
-            "obs_only": False,
-        },
-        {
-            "title": "🟠 Obstacle Exposure\n(Stiker / Banner di Tiang)",
-            "heatmap": obstacle_hm.T,
-            "source": obstacle_hm,
-            "cmap": "plasma",
-            "rank_color": "lime",
-            "obs_only": True,
-        },
-    ]
-
-    obstacle_positions: Set[Tuple[int, int]] = {
-        k for k, v in layout.items() if v == CELL_OBSTACLE
-    }
-
-    for cfg, ax in zip(panel_configs, axes):
-        ax.set_facecolor("#0d0d1a")
-        data = cfg["heatmap"].copy()
-        if data.max() == 0:
-            data += 1e-9
-
-        sns.heatmap(data, ax=ax, cmap=cfg["cmap"], linewidths=0, square=True,
-                    cbar_kws={"label": "Exposure Hits", "shrink": 0.85},
-                    xticklabels=False, yticklabels=False)
-
-        for (col, row) in obstacle_positions:
-            ax.add_patch(plt.Rectangle(
-                (row + 0.05, col + 0.05), 0.9, 0.9,
-                fill=False, edgecolor="#6a6a9a", linewidth=1.5, zorder=4,
-            ))
-            ax.text(row + 0.5, col + 0.5, "🧱",
-                    ha="center", va="center", fontsize=7, zorder=5)
-
-        src = cfg["source"]
-        tops = _get_top_locations(src, n=3, obstacle_only=cfg["obs_only"],
-                                  obstacle_positions=obstacle_positions)
-        for rank, (rx, ry, _) in enumerate(tops):
-            ax.add_patch(plt.Rectangle(
-                (ry + 0.05, rx + 0.05), 0.9, 0.9,
-                fill=False, edgecolor=cfg["rank_color"], linewidth=2.5, zorder=6,
-            ))
-            ax.text(ry + 0.5, rx + 0.5, f"#{rank + 1}",
-                    color=cfg["rank_color"], fontsize=8, fontweight="bold",
-                    ha="center", va="center", zorder=7)
-
-        ax.set_title(cfg["title"], color="white", fontsize=10, fontweight="bold", pad=6)
-        ax.set_xlabel("Kolom", color="#888899", fontsize=7)
-        ax.set_ylabel("Baris", color="#888899", fontsize=7)
-        cbar = ax.collections[0].colorbar
-        cbar.ax.yaxis.label.set_color("white")
-        cbar.ax.tick_params(colors="white")
-
-    fig.suptitle("Heatmap Exposure Akumulatif — Rekomendasi Penempatan Iklan",
-                 color="white", fontsize=12, fontweight="bold", y=1.02)
-    plt.tight_layout()
-    return fig
-
-
-def _get_top_locations(heatmap, n, obstacle_only, obstacle_positions):
-    """Kembalikan n lokasi dengan nilai heatmap tertinggi."""
-    tops = []
-    for idx in np.argsort(heatmap.flatten())[::-1]:
-        if len(tops) >= n:
-            break
-        rx, ry = np.unravel_index(idx, heatmap.shape)
-        value = heatmap[rx, ry]
-        if value == 0:
-            break
-        if obstacle_only and (rx, ry) not in obstacle_positions:
-            continue
-        tops.append((rx, ry, float(value)))
-    return tops
