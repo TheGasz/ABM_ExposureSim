@@ -191,24 +191,22 @@ class HumanAgent:
             dy = next_px[1] - self.pos_px[1]
             dist = math.hypot(dx, dy)
 
-            if dist <= ARRIVE_THRESHOLD_PX:
+            if dist <= remaining:
+                # Agen bisa mencapai (atau melewati) center sel ini dalam dt ini.
+                # Snap ke center dan catat sebagai last_reached_cell.
                 self.pos_px = next_px
-                # Catat sel ini sebagai yang terakhir benar-benar dicapai
                 self.last_reached_cell = next_cell
+                remaining -= dist
                 self.path_idx += 1
-                continue
-
-            if dist > remaining:
+            else:
+                # Agen hanya bergerak sebagian menuju next_cell.
                 ratio = remaining / dist
                 candidate = (self.pos_px[0] + dx * ratio, self.pos_px[1] + dy * ratio)
                 if self.model.is_walkable_pos(candidate, target_cell):
                     self.pos_px = candidate
+                # last_reached_cell TIDAK diubah — agen belum mencapai sel baru.
+                # Path replanning di frame berikutnya akan tetap mulai dari
+                # last_reached_cell yang valid, bukan dari posisi float ini.
                 remaining = 0.0
-            else:
-                self.pos_px = next_px
-                # Catat sel ini sebagai yang terakhir benar-benar dicapai
-                self.last_reached_cell = next_cell
-                remaining -= dist
-                self.path_idx += 1
 
         return self.path_idx >= len(self.path_cells)

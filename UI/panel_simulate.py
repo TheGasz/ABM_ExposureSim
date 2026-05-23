@@ -217,61 +217,92 @@ def panel_simulate(cfg: dict) -> None:
         return n_now
 
     if st.session_state.running:
-        fps_step = cfg["fps_step"]
-        frame_dt = cfg["frame_dt"]   # tetap 1/fps_step, bebas dari speed_x
-        speed_x = cfg["speed_x"]
+        fps_step  = cfg["fps_step"]
+        frame_dt  = cfg["frame_dt"]   # 1/fps_step — tidak bergantung speed_x
+        speed_x   = cfg["speed_x"]
 
-        # Target durasi wall-clock per FRAME (bukan per step) agar animasi
-        # terlihat mulus. fps_step frame ditampilkan dalam 1/speed_x detik,
-        # sehingga target per frame = 1 / (fps_step * speed_x).
-        wall_frame_duration = 1.0 / float(fps_step * speed_x)
+        # Budget waktu wall-clock per STEP (bukan per frame).
+        # Agen tetap di-step fps_step kali per step dengan frame_dt kecil
+        # agar fisika halus, tapi render dilakukan sesering yang masih muat
+        # dalam budget ini. Dengan cara ini fps_step TIDAK mempengaruhi
+        # kecepatan wall-clock — hanya kehalusan fisika.
+        wall_step_budget = 1.0 / float(speed_x)
 
-        # SimRenderer reuse figure yang sama — static layer digambar sekali,
-        # dynamic layer (agen) di-update in-place tiap frame via set_offsets.
-        # Hasilnya di-push ke UI sebagai PNG bytes via st.image (lebih cepat
-        # dari st.pyplot yang membuat figure baru setiap call).
         renderer = SimRenderer(width, height, CELL_SIZE_PX)
-
         try:
             for _ in range(st.session_state.step_count, cfg["max_steps"]):
                 if not st.session_state.running:
                     break
 
-                # fps_step sub-step per step — masing-masing di-render
-                for frame_idx in range(fps_step):
-                    if not st.session_state.running:
-                        break
+                step_start = time.perf_counter()
 
-                    frame_start = time.perf_counter()
+                # --- Jalankan semua sub-step fisika untuk 1 step penuh ---
+                # Render dilakukan di tengah jika ada sisa waktu, atau minimal
+                # sekali di akhir sub-step terakhir.
+                next_render_at = 0       # index sub-step kapan render berikutnya
+                render_cost    = 0.05    # estimasi awal biaya render (detik), adaptif
+                renders_done   = 0
+
+                for sub in range(fps_step):
                     model.step(frame_dt)
 
-                    snap = model.get_grid_snapshot()
-                    n_now  = model.count_humans()
-                    n_sit  = model.count_sitting()
-                    n_pass = model.count_passing()
-                    n_tot  = model.total_customers
+                    now = time.perf_counter()
+                    elapsed = now - step_start
 
-                    ph_step.metric("Step", st.session_state.step_count)
-                    ph_active.metric("Active", n_now)
-                    ph_sit.metric("Sitting", n_sit)
-                    ph_pass.metric("Passing", n_pass)
-                    ph_total.metric("Total Arrived", n_tot)
+                    # Sisa budget setelah sub-step ini
+                    remaining_budget = wall_step_budget - elapsed
 
-                    # Render ke PNG bytes dan tampilkan via st.image
-                    png_bytes = renderer.render(snap)
-                    ph_room.image(png_bytes, use_container_width=True)
-
-                    ph_info.caption(
-                        f"Step {st.session_state.step_count + 1}/{cfg['max_steps']} "
-                        f"· frame {frame_idx + 1}/{fps_step} "
-                        f"· Speed {speed_x}x "
-                        f"· Active: {n_now}"
+                    # Render jika: ini saatnya render (sub >= next_render_at)
+                    # DAN (masih ada cukup budget ATAU ini sub-step terakhir)
+                    should_render = (sub >= next_render_at) and (
+                        remaining_budget >= render_cost * 0.5
+                        or sub == fps_step - 1
                     )
 
-                    elapsed = time.perf_counter() - frame_start
-                    delay = wall_frame_duration - elapsed
-                    if delay > 0:
-                        time.sleep(delay)
+                    if should_render:
+                        render_start = time.perf_counter()
+
+                        snap  = model.get_grid_snapshot()
+                        n_now = model.count_humans()
+                        n_sit = model.count_sitting()
+                        n_pass = model.count_passing()
+                        n_tot = model.total_customers
+
+                        ph_step.metric("Step", st.session_state.step_count)
+                        ph_active.metric("Active",        n_now)
+                        ph_sit.metric("Sitting",          n_sit)
+                        ph_pass.metric("Passing",         n_pass)
+                        ph_total.metric("Total Arrived",  n_tot)
+
+                        png_bytes = renderer.render(snap)
+                        ph_room.image(png_bytes, use_container_width=True)
+
+                        ph_info.caption(
+                            f"Step {st.session_state.step_count + 1}/{cfg['max_steps']} "
+                            f"· sub {sub + 1}/{fps_step} "
+                            f"· Speed {speed_x}x "
+                            f"· Active: {n_now}"
+                        )
+
+                        actual_cost = time.perf_counter() - render_start
+                        # Update estimasi biaya render (exponential moving average)
+                        render_cost = 0.7 * render_cost + 0.3 * actual_cost
+                        renders_done += 1
+
+                        # Jadwalkan render berikutnya: lewati sub-step secukupnya
+                        # agar render berikutnya tidak langsung melebihi budget
+                        remaining_after = wall_step_budget - (time.perf_counter() - step_start)
+                        if remaining_after > render_cost and render_cost > 0:
+                            skip = max(1, int(render_cost / frame_dt))
+                        else:
+                            skip = fps_step  # tidak ada waktu lagi, skip semua
+                        next_render_at = sub + skip
+
+                # --- Habiskan sisa budget dengan sleep ---
+                elapsed = time.perf_counter() - step_start
+                leftover = wall_step_budget - elapsed
+                if leftover > 0:
+                    time.sleep(leftover)
 
                 if not st.session_state.running:
                     break
