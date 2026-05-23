@@ -256,8 +256,8 @@ def panel_simulate(cfg: dict) -> None:
                     # DAN (masih ada cukup budget ATAU ini sub-step terakhir)
                     # BARU - Render lebih sering untuk smooth motion
                     # Render setiap 2 frame, atau minimal di frame terakhir
-                    render_interval = max(1, fps_step // 5)  # ~5 render per step
-                    should_render = (sub % render_interval == 0) or (sub == fps_step - 1)
+                                        # Render SETIAP frame untuk smooth continuous motion
+                    should_render = True
                     if should_render:
                         render_start = time.perf_counter()
 
