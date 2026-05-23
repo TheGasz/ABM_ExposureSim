@@ -53,6 +53,9 @@ class HumanAgent:
         # ketika agen berada di posisi float antara dua sel.
         self.last_reached_cell: Tuple[int, int] = model.cell_from_px(self.pos_px)
         self.stuck_steps = 0
+        # Arah hadap agen dalam radian (0 = kanan, pi/2 = bawah, dst).
+        # Diupdate setiap kali agen benar-benar bergerak.
+        self.facing_angle_rad: float = 0.0
 
         if self.status == HumanStatus.TO_CHAIR and self.chair_cell:
             self._plan_path(self.chair_cell)
@@ -194,6 +197,8 @@ class HumanAgent:
             if dist <= remaining:
                 # Agen bisa mencapai (atau melewati) center sel ini dalam dt ini.
                 # Snap ke center dan catat sebagai last_reached_cell.
+                if dist > 1e-9:
+                    self.facing_angle_rad = math.atan2(dy, dx)
                 self.pos_px = next_px
                 self.last_reached_cell = next_cell
                 remaining -= dist
@@ -204,9 +209,9 @@ class HumanAgent:
                 candidate = (self.pos_px[0] + dx * ratio, self.pos_px[1] + dy * ratio)
                 if self.model.is_walkable_pos(candidate, target_cell):
                     self.pos_px = candidate
+                if dist > 1e-9:
+                    self.facing_angle_rad = math.atan2(dy, dx)
                 # last_reached_cell TIDAK diubah — agen belum mencapai sel baru.
-                # Path replanning di frame berikutnya akan tetap mulai dari
-                # last_reached_cell yang valid, bukan dari posisi float ini.
                 remaining = 0.0
 
         return self.path_idx >= len(self.path_cells)

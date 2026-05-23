@@ -10,13 +10,14 @@ setiap frame sehingga animasi bisa berjalan lancar di fps tinggi.
 """
 
 import io
+import math
 
 import numpy as np
 from typing import List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 from matplotlib.collections import PathCollection
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Rectangle, Polygon
 
 from constants import SIM_COLOR
 
@@ -75,6 +76,10 @@ class SimRenderer:
         )
         plt.tight_layout()
 
+        # Pool Polygon patches untuk vision cone — di-reuse antar frame
+        # agar tidak ada alokasi baru setiap render.
+        self._vision_patches: list = []
+
         # Static layer belum digambar — akan digambar saat render pertama
         self._static_drawn = False
 
@@ -132,6 +137,43 @@ class SimRenderer:
             return []
         return list(points)
 
+    def _update_vision(self, snap: dict) -> None:
+        """Update polygon vision setiap agen bergerak. Reuse patch pool.
+
+        humans_vision sekarang berformat List[List[Tuple[float,float]]]:
+        satu polygon (sudah di-ray-cast, obstacle-aware) per agen.
+        """
+        vision_polygons = snap.get("humans_vision", [])
+
+        n_needed = len(vision_polygons)
+        n_have   = len(self._vision_patches)
+
+        # Tambah Polygon baru jika pool kurang
+        for _ in range(n_needed - n_have):
+            p = Polygon(
+                np.zeros((3, 2)),   # placeholder vertices
+                closed=True,
+                facecolor="#ffffff",
+                edgecolor="none",
+                alpha=0.06,
+                zorder=5,
+                linewidth=0,
+            )
+            self.ax.add_patch(p)
+            self._vision_patches.append(p)
+
+        # Update patch yang dipakai
+        for i, poly_pts in enumerate(vision_polygons):
+            if len(poly_pts) >= 3:
+                self._vision_patches[i].set_xy(np.array(poly_pts))
+                self._vision_patches[i].set_visible(True)
+            else:
+                self._vision_patches[i].set_visible(False)
+
+        # Sembunyikan patch yang tidak dipakai
+        for i in range(n_needed, n_have):
+            self._vision_patches[i].set_visible(False)
+
     def render(self, snap: dict) -> bytes:
         """
         Update dynamic layer dan kembalikan PNG sebagai bytes.
@@ -141,6 +183,7 @@ class SimRenderer:
             self._draw_static(snap)
 
         self._update_chairs(snap)
+        self._update_vision(snap)
 
         # Update posisi agen — hanya set_offsets, tidak ada alokasi baru
         def _upd(sc: PathCollection, points: List[Tuple[float, float]]) -> None:

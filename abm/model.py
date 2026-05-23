@@ -377,6 +377,111 @@ class WaitingRoomModel:
             self.humans = [h for h in self.humans if h not in finished]
 
     # ------------------------------------------------------------------
+    # Vision / Ray casting
+    # ------------------------------------------------------------------
+
+    def ray_cast_vision_polygon(
+        self,
+        pos_px: Tuple[float, float],
+        facing_rad: float,
+        half_angle_rad: float = math.pi / 4,  # ±45°
+        range_px: float = 100.0,
+        num_rays: int = 32,
+    ) -> List[Tuple[float, float]]:
+        """
+        Ray casting berbasis grid: tembakkan num_rays ray dalam cone
+        [facing - half_angle, facing + half_angle].  Setiap ray berhenti
+        saat menabrak sel obstacle (atau dinding luar grid).
+
+        Mengembalikan polygon (list of (x,y) pixel) yang merepresentasikan
+        area yang terlihat oleh agen — tidak menembus obstacle.
+        """
+        cs = self.cell_size_px
+        ox, oy = pos_px
+
+        # Batas grid dalam pixel
+        max_x = self.width  * cs
+        max_y = self.height * cs
+
+        angles = [
+            facing_rad - half_angle_rad + i * (2 * half_angle_rad) / (num_rays - 1)
+            for i in range(num_rays)
+        ]
+
+        polygon: List[Tuple[float, float]] = [pos_px]
+
+        for angle in angles:
+            dx = math.cos(angle)
+            dy = math.sin(angle)
+
+            # DDA ray marching per sel
+            # Hitung step dan tDelta untuk DDA
+            if abs(dx) < 1e-12:
+                t_delta_x = float("inf")
+                step_x = 0
+            else:
+                t_delta_x = abs(cs / dx)
+                step_x = 1 if dx > 0 else -1
+
+            if abs(dy) < 1e-12:
+                t_delta_y = float("inf")
+                step_y = 0
+            else:
+                t_delta_y = abs(cs / dy)
+                step_y = 1 if dy > 0 else -1
+
+            # Sel awal
+            cell_x = int(ox // cs)
+            cell_y = int(oy // cs)
+
+            # t sampai batas sel pertama
+            if dx >= 0:
+                t_max_x = ((cell_x + 1) * cs - ox) / dx if abs(dx) > 1e-12 else float("inf")
+            else:
+                t_max_x = (cell_x * cs - ox) / dx if abs(dx) > 1e-12 else float("inf")
+
+            if dy >= 0:
+                t_max_y = ((cell_y + 1) * cs - oy) / dy if abs(dy) > 1e-12 else float("inf")
+            else:
+                t_max_y = (cell_y * cs - oy) / dy if abs(dy) > 1e-12 else float("inf")
+
+            # Default: ray mencapai ujung range tanpa halangan
+            hit_px: Tuple[float, float] = (ox + dx * range_px, oy + dy * range_px)
+
+            while True:
+                # t_entry = t saat ray menyeberangi batas menuju sel berikutnya.
+                # Ini adalah titik berhenti yang tepat jika sel itu obstacle/OOB.
+                if t_max_x < t_max_y:
+                    t_entry = t_max_x
+                    t_max_x += t_delta_x
+                    cell_x  += step_x
+                else:
+                    t_entry = t_max_y
+                    t_max_y += t_delta_y
+                    cell_y  += step_y
+
+                # Ray sudah melewati range sebelum menabrak apapun
+                if t_entry >= range_px:
+                    hit_px = (ox + dx * range_px, oy + dy * range_px)
+                    break
+
+                # Cek batas grid
+                if not (0 <= cell_x < self.width and 0 <= cell_y < self.height):
+                    t_stop = min(t_entry, range_px)
+                    hit_px = (ox + dx * t_stop, oy + dy * t_stop)
+                    break
+
+                # Cek obstacle — berhenti tepat di tepi masuk sel obstacle
+                if (cell_x, cell_y) in self._obstacles:
+                    t_stop = min(t_entry, range_px)
+                    hit_px = (ox + dx * t_stop, oy + dy * t_stop)
+                    break
+
+            polygon.append(hit_px)
+
+        return polygon
+
+    # ------------------------------------------------------------------
     # Metrics and snapshot
     # ------------------------------------------------------------------
 
@@ -404,15 +509,28 @@ class WaitingRoomModel:
         humans_pass: List[Tuple[float, float]] = []
         humans_sit: List[Tuple[float, float]] = []
 
+        # Vision: polygon pixel-points hasil ray casting per agen bergerak.
+        # Format: List[List[Tuple[float, float]]]  (satu polygon per agen)
+        humans_vision: List[List[Tuple[float, float]]] = []
+
         for human in self.humans:
             if human.status == HumanStatus.SITTING:
                 humans_sit.append(human.pos_px)
             elif human.will_sit and human.status == HumanStatus.TO_CHAIR:
                 humans_seek.append(human.pos_px)
+                humans_vision.append(
+                    self.ray_cast_vision_polygon(human.pos_px, human.facing_angle_rad)
+                )
             elif human.will_sit and human.status == HumanStatus.TO_EXIT:
                 humans_exit.append(human.pos_px)
+                humans_vision.append(
+                    self.ray_cast_vision_polygon(human.pos_px, human.facing_angle_rad)
+                )
             elif not human.will_sit:
                 humans_pass.append(human.pos_px)
+                humans_vision.append(
+                    self.ray_cast_vision_polygon(human.pos_px, human.facing_angle_rad)
+                )
 
         return {
             "obstacles": list(self._obstacles),
@@ -423,4 +541,5 @@ class WaitingRoomModel:
             "humans_exit": humans_exit,
             "humans_pass": humans_pass,
             "humans_sit": humans_sit,
+            "humans_vision": humans_vision,
         }
