@@ -210,6 +210,10 @@ def panel_simulate(cfg: dict) -> None:
     
     progress_bar = st.progress(st.session_state.step_count / max(cfg["max_steps"], 1))
     ph_info = st.empty()
+    
+    # Initialize heatmap cache
+    if "fig_hmap_cache" not in st.session_state:
+        st.session_state.fig_hmap_cache = None
 
     def render_static():
         """Render sekali pakai untuk kondisi pause — pakai plot_sim_room biasa."""
@@ -314,11 +318,18 @@ def panel_simulate(cfg: dict) -> None:
                         next_render_at = sub + skip
 
                 # --- Update heatmap sekali per step (bukan per sub-frame) ---
-                fig_hmap = plot_obstacle_heatmap(
-                    model.obstacle_heatmap, layout, width, height
+                st.session_state.fig_hmap_cache = plot_obstacle_heatmap(
+                    model.obstacle_heatmap, 
+                    layout, 
+                    width, 
+                    height,
+                    prev_fig=st.session_state.fig_hmap_cache  # Reuse figure, hindari flicker
                 )
-                ph_hmap.plotly_chart(fig_hmap, use_container_width=True)
-
+                ph_hmap.plotly_chart(
+                    st.session_state.fig_hmap_cache,
+                    use_container_width=True,
+                    key=f"heatmap_step_{st.session_state.step_count}"
+                )
                 # --- Habiskan sisa budget dengan sleep ---
                 elapsed = time.perf_counter() - step_start
                 leftover = wall_step_budget - elapsed

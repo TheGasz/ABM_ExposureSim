@@ -590,10 +590,14 @@ class WaitingRoomModel:
             ox, oy = self.cell_center_px(obs_cell)
             
             for side_idx, side_name in enumerate(OBSTACLE_SIDES):
-                # Hitung pusat sisi obstacle
+                # Hitung pusat sisi obstacle — sample point harus berada
+                # *di luar* sel obstacle (di ruang terbuka) agar bisa
+                # masuk ke dalam vision polygon agen yang melihatnya.
+                # cs * 0.3 terlalu kecil (masih di dalam sel obstacle sendiri).
+                # Gunakan cs * 0.6 agar titik berada tepat di luar tepi sel.
                 side_offset = OBSTACLE_SIDE_VECTORS[side_name]
-                side_center_x = ox + side_offset[0] * cs * 0.3
-                side_center_y = oy + side_offset[1] * cs * 0.3
+                side_center_x = ox + side_offset[0] * cs * 0.6
+                side_center_y = oy + side_offset[1] * cs * 0.6
                 
                 # Check berapa banyak agents yang bisa melihat sisi ini
                 visible_count = 0
