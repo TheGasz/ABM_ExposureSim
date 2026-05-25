@@ -5,9 +5,10 @@ Simulation panel for running the ABM and visualizing movement.
 """
 
 import time
-
-import matplotlib.pyplot as plt
-import streamlit as st
+from viz.sim_plots import plot_sim_room, SimRenderer
+from viz.obstacle_heatmap import plot_obstacle_heatmap
+import matplotlib.pyplot as plt # type: ignore
+import streamlit as st # type: ignore
 
 from abm.model import WaitingRoomModel
 from constants import CELL_CHAIR, CELL_SIZE_PX, DEFAULT_DT_S
@@ -195,7 +196,18 @@ def panel_simulate(cfg: dict) -> None:
     }
 
     ph_step, ph_active, ph_sit, ph_pass, ph_total = _create_metric_placeholders()
-    ph_room = _create_plot_placeholders()
+    
+    # Plot placeholders — 2 kolom
+    col_room, col_heat = st.columns([1.2, 1], gap="medium")
+    
+    with col_room:
+        st.markdown("#### 🗺️ Room State")
+        ph_room = st.empty()
+    
+    with col_heat:
+        st.markdown("#### 🔥 Obstacle Heatmap")
+        ph_hmap = st.empty()
+    
     progress_bar = st.progress(st.session_state.step_count / max(cfg["max_steps"], 1))
     ph_info = st.empty()
 
@@ -213,6 +225,10 @@ def panel_simulate(cfg: dict) -> None:
         ph_total.metric("Total Arrived", n_tot)
         fig_room = plot_sim_room(snap, width, height, CELL_SIZE_PX)
         ph_room.pyplot(fig_room)
+        # fig_hmap = plot_obstacle_heatmap(
+        #     model.obstacle_heatmap, layout, width, height
+        # )
+        # ph_hmap.plotly_chart(fig_hmap, use_container_width=True, key=f"heatmap_step_{st.session_state.step_count}")
         plt.close(fig_room)
         return n_now
 
@@ -297,6 +313,12 @@ def panel_simulate(cfg: dict) -> None:
                             skip = fps_step  # tidak ada waktu lagi, skip semua
                         next_render_at = sub + skip
 
+                # --- Update heatmap sekali per step (bukan per sub-frame) ---
+                fig_hmap = plot_obstacle_heatmap(
+                    model.obstacle_heatmap, layout, width, height
+                )
+                ph_hmap.plotly_chart(fig_hmap, use_container_width=True)
+
                 # --- Habiskan sisa budget dengan sleep ---
                 elapsed = time.perf_counter() - step_start
                 leftover = wall_step_budget - elapsed
@@ -365,8 +387,3 @@ def _handle_controls(cfg, width, height, layout):
 def _create_metric_placeholders():
     cols = st.columns(5)
     return [col.empty() for col in cols]
-
-
-def _create_plot_placeholders():
-    st.markdown("#### Room State")
-    return st.empty()

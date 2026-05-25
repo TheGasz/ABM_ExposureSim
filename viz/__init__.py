@@ -6,6 +6,7 @@ Public visualization API.
 
 from viz.editor_plot import build_editor_figure
 from viz.sim_plots import plot_sim_room
+from viz.obstacle_heatmap import plot_obstacle_heatmap
 
 __all__ = [
     "build_editor_figure",

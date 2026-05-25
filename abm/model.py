@@ -9,7 +9,7 @@ import math
 import random
 from typing import Dict, List, Optional, Set, Tuple
 
-import numpy as np
+import numpy as np # type: ignore
 
 from constants import (
     CELL_CHAIR,
@@ -21,7 +21,11 @@ from constants import (
     DEFAULT_FPSTEP,
     CELL_SIZE_PX,
     SPEED_VARIATION,
+    OBSTACLE_SIDES,
+    OBSTACLE_SIDE_VECTORS,
+    HEATMAP_LOOK_DURATION_S,
 )
+
 from abm.agents import HumanAgent, HumanStatus
 
 
@@ -59,6 +63,7 @@ class WaitingRoomModel:
             speed_px_s = SPEED_PX_PER_S * fps_step / DEFAULT_FPSTEP
 
         self.speed_px_s = max(1e-3, speed_px_s)
+        self.frame_dt = 1.0 / float(fps_step)  # ← ADD THIS
         self.jitter = min(max(jitter, 0.0), 0.95)
         self.stuck_threshold = max(1, stuck_threshold)
 
@@ -75,11 +80,15 @@ class WaitingRoomModel:
         self._chairs: Dict[Tuple[int, int], Dict[str, object]] = {}
         self._obstacles: Set[Tuple[int, int]] = set()
         self._doors: List[Tuple[int, int]] = []
+        self.obstacle_heatmap = {}
+        
 
         self.humans: List[HumanAgent] = []
+        
 
         self._load_layout(layout)
         self._ensure_doors()
+        self._init_obstacle_heatmap()
 
     def _load_layout(self, layout: Layout) -> None:
         for (col, row), cell_type in layout.items():
@@ -392,6 +401,10 @@ class WaitingRoomModel:
         if finished:
             self.humans = [h for h in self.humans if h not in finished]
 
+        # Update heatmap berdasarkan vision agents
+        snap = self.get_grid_snapshot()
+        self.update_obstacle_heatmap(snap["humans_vision"])
+
     # ------------------------------------------------------------------
     # Vision / Ray casting
     # ------------------------------------------------------------------
@@ -559,3 +572,62 @@ class WaitingRoomModel:
             "humans_sit": humans_sit,
             "humans_vision": humans_vision,
         }
+    def _init_obstacle_heatmap(self) -> None:
+        """Initialize heatmap untuk semua obstacles."""
+        for obs_cell in self._obstacles:
+            self.obstacle_heatmap[obs_cell] = {
+                "top": 0.0,
+                "right": 0.0,
+                "bottom": 0.0,
+                "left": 0.0,
+            }
+
+    def update_obstacle_heatmap(self, humans_vision: List[List[Tuple[float, float]]]) -> None:
+        """Update heatmap berdasarkan vision polygon dari agents."""
+        cs = self.cell_size_px
+        
+        for obs_cell in self._obstacles:
+            ox, oy = self.cell_center_px(obs_cell)
+            
+            for side_idx, side_name in enumerate(OBSTACLE_SIDES):
+                # Hitung pusat sisi obstacle
+                side_offset = OBSTACLE_SIDE_VECTORS[side_name]
+                side_center_x = ox + side_offset[0] * cs * 0.3
+                side_center_y = oy + side_offset[1] * cs * 0.3
+                
+                # Check berapa banyak agents yang bisa melihat sisi ini
+                visible_count = 0
+                for vision_polygon in humans_vision:
+                    if self._point_in_polygon(
+                        (side_center_x, side_center_y), 
+                        vision_polygon
+                    ):
+                        visible_count += 1
+                
+                # Weight increase: 0.2 per agent per frame
+                weight_increase = visible_count * (self.frame_dt / HEATMAP_LOOK_DURATION_S)
+                self.obstacle_heatmap[obs_cell][side_name] += weight_increase
+
+    def _point_in_polygon(
+        self, 
+        point: Tuple[float, float], 
+        polygon: List[Tuple[float, float]]
+    ) -> bool:
+        """Check apakah point ada dalam polygon (ray casting algorithm)."""
+        x, y = point
+        n = len(polygon)
+        inside = False
+        
+        p1x, p1y = polygon[0]
+        for i in range(1, n + 1):
+            p2x, p2y = polygon[i % n]
+            if y > min(p1y, p2y):
+                if y <= max(p1y, p2y):
+                    if x <= max(p1x, p2x):
+                        if p1y != p2y:
+                            xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                        if p1x == p2x or x <= xinters:
+                            inside = not inside
+            p1x, p1y = p2x, p2y
+        
+        return inside

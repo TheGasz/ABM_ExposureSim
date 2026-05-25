@@ -106,3 +106,19 @@ SIM_COLOR: Dict[str, str] = {
     "human_sit": "#f5a623",
     "human_pass": "#9bdeac",
 }
+
+# =============================================================================
+# HEATMAP CONFIGURATION
+# =============================================================================
+
+# Obstacle sides: 0=top, 1=right, 2=bottom, 3=left
+OBSTACLE_SIDES = ["top", "right", "bottom", "left"]
+OBSTACLE_SIDE_VECTORS = {
+    "top": (0, -1),
+    "right": (1, 0),
+    "bottom": (0, 1),
+    "left": (-1, 0),
+}
+
+# Heatmap decay: berapa lama agent harus melihat agar weight +1
+HEATMAP_LOOK_DURATION_S = 0.5  # 500ms = 1 weight point
