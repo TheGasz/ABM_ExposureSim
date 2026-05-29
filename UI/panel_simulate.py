@@ -205,11 +205,12 @@ def panel_simulate(cfg: dict) -> None:
         ph_room = st.empty()
     
     with col_heat:
-        st.markdown("#### 🔥 Obstacle Heatmap")
+        st.markdown("####  Obstacle Heatmap")
         ph_hmap = st.empty()
     
     progress_bar = st.progress(st.session_state.step_count / max(cfg["max_steps"], 1))
     ph_info = st.empty()
+    ph_debug = st.empty()
     
     # Initialize heatmap cache
     if "fig_hmap_cache" not in st.session_state:
@@ -316,23 +317,36 @@ def panel_simulate(cfg: dict) -> None:
                         else:
                             skip = fps_step  # tidak ada waktu lagi, skip semua
                         next_render_at = sub + skip
-
+                        
+                    
+                if st.session_state.step_count % 50 == 0:
                 # --- Update heatmap sekali per step (bukan per sub-frame) ---
-                st.session_state.fig_hmap_cache = plot_obstacle_heatmap(
-                    model.obstacle_heatmap, 
-                    layout, 
-                    width, 
-                    height,
-                    prev_fig=st.session_state.fig_hmap_cache  # Reuse figure, hindari flicker
-                )
-                ph_hmap.plotly_chart(
-                    st.session_state.fig_hmap_cache,
-                    use_container_width=True,
-                    key=f"heatmap_step_{st.session_state.step_count}"
-                )
-                # --- Habiskan sisa budget dengan sleep ---
+                    st.session_state.fig_hmap_cache = plot_obstacle_heatmap(
+                        model.obstacle_heatmap, 
+                        layout, 
+                        width, 
+                        height,
+                        prev_fig=st.session_state.fig_hmap_cache  # Reuse figure, hindari flicker
+                    )
+                    ph_hmap.plotly_chart(
+                        st.session_state.fig_hmap_cache,
+                        use_container_width=True,
+                        key=f"heatmap_step_{st.session_state.step_count}"
+                    )
+                    
+                
+                 # --- DEBUG: Hitung waktu yang sudah terpakai ---
                 elapsed = time.perf_counter() - step_start
                 leftover = wall_step_budget - elapsed
+                # Update debug info setiap step
+                if st.session_state.step_count % 10 == 0:
+                    debug_msg = (
+                        f"Step {st.session_state.step_count + 1}/{cfg['max_steps']} | "
+                        f"Speed: {speed_x}x (budget: {wall_step_budget*1000:.0f}ms) | "
+                        f"Elapsed: {elapsed*1000:.1f}ms | "
+                        f"Leftover: {max(0, leftover)*1000:.1f}ms"
+                    )
+                    ph_debug.info(debug_msg)
                 if leftover > 0:
                     time.sleep(leftover)
 

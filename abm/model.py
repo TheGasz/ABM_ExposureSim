@@ -545,6 +545,9 @@ class WaitingRoomModel:
         for human in self.humans:
             if human.status == HumanStatus.SITTING:
                 humans_sit.append(human.pos_px)
+                humans_vision.append(
+                    self.ray_cast_vision_polygon(human.pos_px, human.facing_angle_rad)
+                )
             elif human.will_sit and human.status == HumanStatus.TO_CHAIR:
                 humans_seek.append(human.pos_px)
                 humans_vision.append(
