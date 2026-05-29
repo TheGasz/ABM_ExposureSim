@@ -200,7 +200,7 @@ def panel_simulate(cfg: dict) -> None:
     
     progress_bar = st.progress(st.session_state.step_count / max(cfg["max_steps"], 1))
     ph_info = st.empty()
-    ph_debug = st.empty()
+    
     
     # Initialize heatmap cache
     if "fig_hmap_cache" not in st.session_state:
@@ -329,16 +329,7 @@ def panel_simulate(cfg: dict) -> None:
                         if adaptive_fps_step > MIN_ADAPTIVE_FPSTEP:
                             adaptive_fps_step -= 1
                 
-                # Debug info
-                if st.session_state.step_count % 10 == 0:
-                    debug_msg = (
-                        f"Step {st.session_state.step_count + 1}/{cfg['max_steps']} | "
-                        f"Speed: {speed_x}x (budget: {wall_step_budget*1000:.0f}ms) | "
-                        f"Elapsed: {elapsed*1000:.1f}ms | "
-                        f"Leftover: {max(0, leftover)*1000:.1f}ms | "
-                        f"Adaptive FPS: {adaptive_fps_step}"
-                    )
-                    ph_debug.info(debug_msg)
+                
                 
                 if leftover > 0:
                     time.sleep(leftover)
@@ -362,20 +353,38 @@ def panel_simulate(cfg: dict) -> None:
         # Check jika model belum di-initialize sebelum render
         if st.session_state.model is not None:
             render_static()
-            if st.session_state.step_count > 0:
+            
+            # Tampilkan final heatmap saat stop atau selesai
+            if st.session_state.get("show_final_heatmap", False) or st.session_state.step_count >= cfg["max_steps"]:
+                # Generate fresh heatmap final
+                fig_final_hmap = plot_obstacle_heatmap(
+                    st.session_state.model.obstacle_heatmap,
+                    layout,
+                    width,
+                    height
+                )
+                # Render langsung, tidak perlu cache
+                ph_hmap.plotly_chart(
+                    fig_final_hmap, 
+                    use_container_width=True
+                )
+                ph_info.success(
+                    f"✓ Simulation stopped at step {st.session_state.step_count}. "
+                    f"Total arrivals: {st.session_state.model.total_customers}."
+                )
+            elif st.session_state.step_count > 0:
                 ph_info.caption(
-                    f"Paused at step {st.session_state.step_count}. Press Start to resume."
+                    f"⏸️ Paused at step {st.session_state.step_count}. Press Start to resume."
                 )
             else:
-                ph_info.caption("Press Start to begin the simulation.")
+                ph_info.caption("Press **Start** to begin the simulation.")
         else:
-            ph_info.caption("⚠️ Model belum di-initialize. Tekan **▶ Mulai** untuk memulai simulasi.")
-
+            ph_info.warning("⚠️ Model belum di-initialize. Tekan **Start** untuk memulai simulasi.")
+            
 def _handle_controls(cfg, width, height, layout):
     chair_dirs = get_chair_directions()
     door_probs = st.session_state.get("door_probs", {})
     
-
     def _new_model():
         return WaitingRoomModel(
             width=width,
@@ -386,7 +395,7 @@ def _handle_controls(cfg, width, height, layout):
             arrival_rate=cfg["arrival_rate"],
             mean_sitting_s=cfg["mean_sitting"],
             pass_through_prob=cfg["pass_through_prob"],
-            fps_step=cfg["fps_step"],  # <-- TAMBAHKAN INI
+            fps_step=cfg["fps_step"],  
             seed=cfg["seed"],
         )
 
@@ -394,12 +403,23 @@ def _handle_controls(cfg, width, height, layout):
         st.session_state.model = _new_model()
         st.session_state.step_count = 0
         st.session_state.running = True
+        st.session_state.show_final_heatmap = False
     elif cfg["stop"]:
         st.session_state.running = False
-    elif cfg["reset_sim"] or st.session_state.model is None:
+        st.session_state.show_final_heatmap = True
+        st.rerun()
+    elif cfg["reset_sim"]:
         st.session_state.model = _new_model()
         st.session_state.step_count = 0
         st.session_state.running = False
+        st.session_state.show_final_heatmap = False
+    
+    # Initialize model hanya jika belum ada
+    if st.session_state.model is None:
+        st.session_state.model = _new_model()
+        st.session_state.step_count = 0
+        st.session_state.running = False
+        st.session_state.show_final_heatmap = False
 
 
 def _create_metric_placeholders():
