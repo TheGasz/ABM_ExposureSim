@@ -95,7 +95,16 @@ class HumanAgent:
             if self.sit_remaining_s <= 0:
                 if self.chair_cell:
                     self.model.release_chair(self.chair_cell, self)
-                start_cell = self.last_reached_cell
+                    # Cari sel kosong di sebelah kursi untuk "berdiri" dari kursi
+                    start_cell = self._find_adjacent_walkable_cell(self.chair_cell)
+                    if not start_cell:
+                        start_cell = self.last_reached_cell
+                    self.last_reached_cell = start_cell
+                    self.pos_px = self.model.cell_center_px(start_cell) 
+                    self.chair_cell = None
+                else:
+                    start_cell = self.last_reached_cell
+                    
                 self.exit_cell = self.exit_cell or self.model.choose_reachable_exit(
                     start_cell, self.entry_cell, prefer_other=False
                 )
@@ -215,3 +224,12 @@ class HumanAgent:
                 remaining = 0.0
 
         return self.path_idx >= len(self.path_cells)
+    
+    def _find_adjacent_walkable_cell(self, cell: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+        """Cari sel kosong yang adjacent ke chair untuk 'standing up'."""
+        col, row = cell
+        for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+            adjacent = (col + dx, row + dy)
+            if self.model.is_walkable_cell(adjacent):
+                return adjacent
+        return None

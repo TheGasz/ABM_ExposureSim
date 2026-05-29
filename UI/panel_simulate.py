@@ -18,7 +18,7 @@ from viz.sim_plots import plot_sim_room, SimRenderer
 # Frames per step: berapa frame dirender untuk setiap 1 step (1 detik simulasi)
 MIN_FPSTEP = 4
 MAX_FPSTEP = 30
-DEFAULT_FPSTEP = 10
+DEFAULT_FPSTEP = 14
 
 # Simulation speed multiplier (hanya mempengaruhi wall-clock, bukan kecepatan agen)
 MIN_SPEED = 1
@@ -99,17 +99,7 @@ def build_sidebar_sim() -> dict:
 
         st.subheader("Playback")
         fps_step_default = _resolve_default_fpstep(sim_defaults)
-        fps_step = st.slider(
-            "Frames per Step",
-            MIN_FPSTEP,
-            MAX_FPSTEP,
-            fps_step_default,
-            1,
-            help=(
-                "Jumlah frame yang dirender per 1 step (= 1 detik simulasi). "
-                "Makin tinggi = gerakan agen lebih halus."
-            ),
-        )
+        
         speed_x = st.select_slider(
             "Simulation Speed",
             options=list(range(MIN_SPEED, MAX_SPEED + 1)),
@@ -124,15 +114,15 @@ def build_sidebar_sim() -> dict:
 
         # frame_dt: detik simulasi per frame — TIDAK bergantung speed_x
         # agar kecepatan agen (px/step) selalu sama di semua speed level
-        frame_dt = 1.0 / float(fps_step)
+        frame_dt = 1.0 / float(DEFAULT_FPSTEP)
 
         # wall-clock delay per frame diperkecil sesuai speed_x
-        wall_fps = fps_step * speed_x  # target frame/detik wall-clock
+        wall_fps = DEFAULT_FPSTEP * speed_x  # target frame/detik wall-clock
 
         st.caption(
             f"frame\\_dt = **{frame_dt:.3f} s** · "
             f"wall FPS ≈ **{wall_fps}** · "
-            f"1 step = **{fps_step} frames**"
+            f"1 step = **{DEFAULT_FPSTEP} frames**"
         )
 
         st.subheader("Simulation Control")
@@ -160,7 +150,7 @@ def build_sidebar_sim() -> dict:
         arrival_rate=arrival_rate,
         mean_sitting=float(mean_sitting),
         pass_through_prob=float(pass_prob),
-        fps_step=int(fps_step),
+        fps_step=DEFAULT_FPSTEP,  
         speed_x=int(speed_x),
         frame_dt=float(frame_dt),
         wall_fps=int(wall_fps),
@@ -238,47 +228,40 @@ def panel_simulate(cfg: dict) -> None:
         return n_now
 
     if st.session_state.running:
-        fps_step  = cfg["fps_step"]
-        frame_dt  = cfg["frame_dt"]   # 1/fps_step — tidak bergantung speed_x
+        frame_dt  = cfg["frame_dt"]   # Initial frame_dt
         speed_x   = cfg["speed_x"]
-
-        # Budget waktu wall-clock per STEP (bukan per frame).
-        # Agen tetap di-step fps_step kali per step dengan frame_dt kecil
-        # agar fisika halus, tapi render dilakukan sesering yang masih muat
-        # dalam budget ini. Dengan cara ini fps_step TIDAK mempengaruhi
-        # kecepatan wall-clock — hanya kehalusan fisika.
         wall_step_budget = 1.0 / float(speed_x)
-
+        
+        # Adaptive fps_step: mulai dari config, bisa naik/turun
+        adaptive_fps_step = cfg["fps_step"]
+        MIN_ADAPTIVE_FPSTEP = 4
+        MAX_ADAPTIVE_FPSTEP = 30
+        
         renderer = SimRenderer(width, height, CELL_SIZE_PX)
+        
+        # Performance metrics untuk adaptive adjustment
+        perf_history = {"elapsed": [], "leftover": []}
+        
         try:
             for _ in range(st.session_state.step_count, cfg["max_steps"]):
                 if not st.session_state.running:
                     break
 
                 step_start = time.perf_counter()
+                
+                # Update frame_dt berdasarkan adaptive fps_step
+                frame_dt = 1.0 / float(adaptive_fps_step)
 
-                # --- Jalankan semua sub-step fisika untuk 1 step penuh ---
-                # Render dilakukan di tengah jika ada sisa waktu, atau minimal
-                # sekali di akhir sub-step terakhir.
-                next_render_at = 0       # index sub-step kapan render berikutnya
-                render_cost    = 0.05    # estimasi awal biaya render (detik), adaptif
-                renders_done   = 0
-
-                for sub in range(fps_step):
+                for sub in range(adaptive_fps_step):
                     model.step(frame_dt)
 
                     now = time.perf_counter()
                     elapsed = now - step_start
-
-                    # Sisa budget setelah sub-step ini
                     remaining_budget = wall_step_budget - elapsed
 
-                    # Render jika: ini saatnya render (sub >= next_render_at)
-                    # DAN (masih ada cukup budget ATAU ini sub-step terakhir)
-                    # BARU - Render lebih sering untuk smooth motion
-                    # Render setiap 2 frame, atau minimal di frame terakhir
-                                        # Render SETIAP frame untuk smooth continuous motion
+                    # Render setiap frame untuk smooth motion
                     should_render = True
+                    
                     if should_render:
                         render_start = time.perf_counter()
 
@@ -299,54 +282,64 @@ def panel_simulate(cfg: dict) -> None:
 
                         ph_info.caption(
                             f"Step {st.session_state.step_count + 1}/{cfg['max_steps']} "
-                            f"· sub {sub + 1}/{fps_step} "
+                            f"· sub {sub + 1}/{adaptive_fps_step} "
                             f"· Speed {speed_x}x "
-                            f"· Active: {n_now}"
+                            f"· FPS: {adaptive_fps_step}"
                         )
 
-                        actual_cost = time.perf_counter() - render_start
-                        # Update estimasi biaya render (exponential moving average)
-                        render_cost = 0.7 * render_cost + 0.3 * actual_cost
-                        renders_done += 1
-
-                        # Jadwalkan render berikutnya: lewati sub-step secukupnya
-                        # agar render berikutnya tidak langsung melebihi budget
-                        remaining_after = wall_step_budget - (time.perf_counter() - step_start)
-                        if remaining_after > render_cost and render_cost > 0:
-                            skip = max(1, int(render_cost / frame_dt))
-                        else:
-                            skip = fps_step  # tidak ada waktu lagi, skip semua
-                        next_render_at = sub + skip
-                        
-                    
-                if st.session_state.step_count % 50 == 0:
-                # --- Update heatmap sekali per step (bukan per sub-frame) ---
-                    st.session_state.fig_hmap_cache = plot_obstacle_heatmap(
-                        model.obstacle_heatmap, 
-                        layout, 
-                        width, 
-                        height,
-                        prev_fig=st.session_state.fig_hmap_cache  # Reuse figure, hindari flicker
-                    )
-                    ph_hmap.plotly_chart(
-                        st.session_state.fig_hmap_cache,
-                        use_container_width=True,
-                        key=f"heatmap_step_{st.session_state.step_count}"
-                    )
-                    
+                # --- Heatmap update ---
                 
-                 # --- DEBUG: Hitung waktu yang sudah terpakai ---
+                st.session_state.fig_hmap_cache = plot_obstacle_heatmap(
+                    model.obstacle_heatmap, 
+                    layout, 
+                    width, 
+                    height,
+                    prev_fig=st.session_state.fig_hmap_cache
+                )
+                ph_hmap.plotly_chart(
+                    st.session_state.fig_hmap_cache,
+                    use_container_width=True,
+                    key=f"heatmap_step_{st.session_state.step_count}"
+                )
+
+                # --- Performance monitoring & adaptive adjustment ---
                 elapsed = time.perf_counter() - step_start
                 leftover = wall_step_budget - elapsed
-                # Update debug info setiap step
+                
+                perf_history["elapsed"].append(elapsed)
+                perf_history["leftover"].append(leftover)
+                
+                # Keep only last 20 measurements untuk smooth averaging
+                if len(perf_history["elapsed"]) > 20:
+                    perf_history["elapsed"].pop(0)
+                    perf_history["leftover"].pop(0)
+                
+                # Adjust fps_step setiap 10 steps
+                if st.session_state.step_count % 10 == 0 and st.session_state.step_count > 0:
+                    avg_elapsed = sum(perf_history["elapsed"]) / len(perf_history["elapsed"])
+                    avg_leftover = sum(perf_history["leftover"]) / len(perf_history["leftover"])
+                    
+                    # Hysteresis: hanya adjust kalau performance cukup jelas
+                    if avg_leftover > wall_step_budget * 0.2:  # >20% budget leftover
+                        # Ada banyak slack → coba increase fps_step
+                        if adaptive_fps_step < MAX_ADAPTIVE_FPSTEP:
+                            adaptive_fps_step += 1
+                    elif avg_leftover < wall_step_budget * 0.05 and avg_leftover < 0:  # Melebihi budget
+                        # Ketat sekali → decrease fps_step
+                        if adaptive_fps_step > MIN_ADAPTIVE_FPSTEP:
+                            adaptive_fps_step -= 1
+                
+                # Debug info
                 if st.session_state.step_count % 10 == 0:
                     debug_msg = (
                         f"Step {st.session_state.step_count + 1}/{cfg['max_steps']} | "
                         f"Speed: {speed_x}x (budget: {wall_step_budget*1000:.0f}ms) | "
                         f"Elapsed: {elapsed*1000:.1f}ms | "
-                        f"Leftover: {max(0, leftover)*1000:.1f}ms"
+                        f"Leftover: {max(0, leftover)*1000:.1f}ms | "
+                        f"Adaptive FPS: {adaptive_fps_step}"
                     )
                     ph_debug.info(debug_msg)
+                
                 if leftover > 0:
                     time.sleep(leftover)
 

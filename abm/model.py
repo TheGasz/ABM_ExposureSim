@@ -197,7 +197,12 @@ class WaitingRoomModel:
         if not self.is_walkable_cell(start_cell, target_cell=target_cell):
             return []
         if not self.is_walkable_cell(target_cell, target_cell=target_cell):
-            return []
+            if start_cell not in self._chairs:
+                return []
+        if not self.is_walkable_cell(target_cell, target_cell=target_cell):
+            if target_cell not in self._chairs:
+                return []
+               
 
         open_heap: List[Tuple[float, float, Tuple[int, int]]] = []
         heapq.heappush(open_heap, (0.0, 0.0, start_cell))
