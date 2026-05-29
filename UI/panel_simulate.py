@@ -4,7 +4,6 @@ ui/panel_simulate.py
 Simulation panel for running the ABM and visualizing movement.
 """
 
-import time
 from viz.sim_plots import plot_sim_room, SimRenderer
 from viz.obstacle_heatmap import plot_obstacle_heatmap
 import matplotlib.pyplot as plt # type: ignore
@@ -15,48 +14,11 @@ from constants import CELL_CHAIR, CELL_SIZE_PX, DEFAULT_DT_S
 from ui.state import grid_state_to_layout, get_chair_directions
 from viz.sim_plots import plot_sim_room, SimRenderer
 
-# Frames per step: berapa frame dirender untuk setiap 1 step (1 detik simulasi)
-MIN_FPSTEP = 4
-MAX_FPSTEP = 30
-DEFAULT_FPSTEP = 14
-
 # Simulation speed multiplier (hanya mempengaruhi wall-clock, bukan kecepatan agen)
 MIN_SPEED = 1
 MAX_SPEED = 5
-
-LEGACY_MOTION_DT = {
-    1: 0.2,
-    2: 0.15,
-    3: 0.1,
-    4: 0.08,
-    5: 0.05,
-}
-
-
-def _resolve_default_fpstep(sim_defaults: dict) -> int:
-    """Backward-compatible: convert lama fps/sim_dt/motion_level ke fps_step baru."""
-    if "fps_step" in sim_defaults:
-        val = int(sim_defaults["fps_step"])
-        return max(MIN_FPSTEP, min(MAX_FPSTEP, val))
-
-    if "fps" in sim_defaults:
-        val = int(float(sim_defaults["fps"]))
-        return max(MIN_FPSTEP, min(MAX_FPSTEP, val))
-
-    if "sim_dt" in sim_defaults:
-        sim_dt = float(sim_defaults["sim_dt"])
-        if sim_dt > 1e-9:
-            val = int(round(1.0 / sim_dt))
-            return max(MIN_FPSTEP, min(MAX_FPSTEP, val))
-
-    if "motion_level" in sim_defaults:
-        level = int(sim_defaults.get("motion_level", 3))
-        sim_dt = LEGACY_MOTION_DT.get(level, DEFAULT_DT_S)
-        if sim_dt > 1e-9:
-            val = int(round(1.0 / sim_dt))
-            return max(MIN_FPSTEP, min(MAX_FPSTEP, val))
-
-    return DEFAULT_FPSTEP
+# Fixed simulation timestep (detik simulasi per update)
+SIM_DT_S = DEFAULT_DT_S
 
 
 def build_sidebar_sim() -> dict:
@@ -98,31 +60,23 @@ def build_sidebar_sim() -> dict:
         )
 
         st.subheader("Playback")
-        fps_step_default = _resolve_default_fpstep(sim_defaults)
-        
         speed_x = st.select_slider(
             "Simulation Speed",
             options=list(range(MIN_SPEED, MAX_SPEED + 1)),
             value=int(sim_defaults.get("speed_x", 1)),
             format_func=lambda v: f"{v}×",
             help=(
-                "Kecepatan playback. Kecepatan jalan agen tidak berubah — "
-                "hanya wall-clock yang dipercepat. "
+                "Kecepatan simulasi. Waktu simulasi melompat lebih besar "
+                "per update, FPS menyesuaikan performa. "
                 "5× berarti 200 step selesai 5× lebih cepat dari 1×."
             ),
         )
 
-        # frame_dt: detik simulasi per frame — TIDAK bergantung speed_x
-        # agar kecepatan agen (px/step) selalu sama di semua speed level
-        frame_dt = 1.0 / float(DEFAULT_FPSTEP)
-
-        # wall-clock delay per frame diperkecil sesuai speed_x
-        wall_fps = DEFAULT_FPSTEP * speed_x  # target frame/detik wall-clock
-
+        base_dt = SIM_DT_S
+        effective_dt = base_dt * speed_x
         st.caption(
-            f"frame\\_dt = **{frame_dt:.3f} s** · "
-            f"wall FPS ≈ **{wall_fps}** · "
-            f"1 step = **{DEFAULT_FPSTEP} frames**"
+            f"base sim\\_dt = **{base_dt:.3f} s** · "
+            f"effective dt = **{effective_dt:.3f} s** · FPS auto"
         )
 
         st.subheader("Simulation Control")
@@ -150,10 +104,7 @@ def build_sidebar_sim() -> dict:
         arrival_rate=arrival_rate,
         mean_sitting=float(mean_sitting),
         pass_through_prob=float(pass_prob),
-        fps_step=DEFAULT_FPSTEP,  
         speed_x=int(speed_x),
-        frame_dt=float(frame_dt),
-        wall_fps=int(wall_fps),
         max_steps=int(max_steps),
         seed=int(seed),
         start=start,
@@ -174,12 +125,12 @@ def panel_simulate(cfg: dict) -> None:
 
     _handle_controls(cfg, width, height, layout)
     model: WaitingRoomModel = st.session_state.model
+    max_steps = float(cfg["max_steps"])
 
     st.session_state.sim_config = {
         "arrival_rate": cfg["arrival_rate"],
         "mean_sitting": cfg["mean_sitting"],
         "pass_through_prob": cfg["pass_through_prob"],
-        "fps_step": cfg["fps_step"],
         "speed_x": cfg["speed_x"],
         "max_steps": cfg["max_steps"],
         "seed": cfg["seed"],
@@ -198,7 +149,8 @@ def panel_simulate(cfg: dict) -> None:
         st.markdown("####  Obstacle Heatmap")
         ph_hmap = st.empty()
     
-    progress_bar = st.progress(st.session_state.step_count / max(cfg["max_steps"], 1))
+    current_time = model.time_s if model is not None else 0.0
+    progress_bar = st.progress(min(current_time / max(max_steps, 1.0), 1.0))
     ph_info = st.empty()
     
     
@@ -213,7 +165,9 @@ def panel_simulate(cfg: dict) -> None:
         n_sit = model.count_sitting()
         n_pass = model.count_passing()
         n_tot = model.total_customers
-        ph_step.metric("Step", st.session_state.step_count)
+        step_value = int(model.time_s)
+        st.session_state.step_count = step_value
+        ph_step.metric("Step", step_value)
         ph_active.metric("Active", n_now)
         ph_sit.metric("Sitting", n_sit)
         ph_pass.metric("Passing", n_pass)
@@ -228,64 +182,43 @@ def panel_simulate(cfg: dict) -> None:
         return n_now
 
     if st.session_state.running:
-        frame_dt  = cfg["frame_dt"]   # Initial frame_dt
-        speed_x   = cfg["speed_x"]
-        wall_step_budget = 1.0 / float(speed_x)
-        
-        # Adaptive fps_step: mulai dari config, bisa naik/turun
-        adaptive_fps_step = cfg["fps_step"]
-        MIN_ADAPTIVE_FPSTEP = 4
-        MAX_ADAPTIVE_FPSTEP = 30
-        
+        speed_x = cfg["speed_x"]
+        base_dt = SIM_DT_S
+        sim_dt = base_dt * speed_x
+
         renderer = SimRenderer(width, height, CELL_SIZE_PX)
-        
-        # Performance metrics untuk adaptive adjustment
-        perf_history = {"elapsed": [], "leftover": []}
-        
+        frame_idx = 0
         try:
-            for _ in range(st.session_state.step_count, cfg["max_steps"]):
+            while model.time_s < max_steps:
                 if not st.session_state.running:
                     break
 
-                step_start = time.perf_counter()
-                
-                # Update frame_dt berdasarkan adaptive fps_step
-                frame_dt = 1.0 / float(adaptive_fps_step)
+                model.step(sim_dt)
 
-                for sub in range(adaptive_fps_step):
-                    model.step(frame_dt)
+                sim_time_s = model.time_s
+                step_value = int(sim_time_s)
+                st.session_state.step_count = step_value
 
-                    now = time.perf_counter()
-                    elapsed = now - step_start
-                    remaining_budget = wall_step_budget - elapsed
+                snap = model.get_grid_snapshot()
+                n_now = model.count_humans()
+                n_sit = model.count_sitting()
+                n_pass = model.count_passing()
+                n_tot = model.total_customers
 
-                    # Render setiap frame untuk smooth motion
-                    should_render = True
-                    
-                    if should_render:
-                        render_start = time.perf_counter()
+                ph_step.metric("Step", step_value)
+                ph_active.metric("Active", n_now)
+                ph_sit.metric("Sitting", n_sit)
+                ph_pass.metric("Passing", n_pass)
+                ph_total.metric("Total Arrived", n_tot)
 
-                        snap  = model.get_grid_snapshot()
-                        n_now = model.count_humans()
-                        n_sit = model.count_sitting()
-                        n_pass = model.count_passing()
-                        n_tot = model.total_customers
+                png_bytes = renderer.render(snap)
+                ph_room.image(png_bytes, use_container_width=True)
 
-                        ph_step.metric("Step", st.session_state.step_count)
-                        ph_active.metric("Active",        n_now)
-                        ph_sit.metric("Sitting",          n_sit)
-                        ph_pass.metric("Passing",         n_pass)
-                        ph_total.metric("Total Arrived",  n_tot)
-
-                        png_bytes = renderer.render(snap)
-                        ph_room.image(png_bytes, use_container_width=True)
-
-                        ph_info.caption(
-                            f"Step {st.session_state.step_count + 1}/{cfg['max_steps']} "
-                            f"· sub {sub + 1}/{adaptive_fps_step} "
-                            f"· Speed {speed_x}x "
-                            f"· FPS: {adaptive_fps_step}"
-                        )
+                ph_info.caption(
+                    f"Time {sim_time_s:.1f}/{max_steps:.1f} s "
+                    f"· Speed {speed_x}x "
+                    f"· Active: {n_now}"
+                )
 
                 # --- Heatmap update ---
                 
@@ -299,46 +232,14 @@ def panel_simulate(cfg: dict) -> None:
                 ph_hmap.plotly_chart(
                     st.session_state.fig_hmap_cache,
                     use_container_width=True,
-                    key=f"heatmap_step_{st.session_state.step_count}"
+                    key=f"heatmap_frame_{frame_idx}"
                 )
-
-                # --- Performance monitoring & adaptive adjustment ---
-                elapsed = time.perf_counter() - step_start
-                leftover = wall_step_budget - elapsed
-                
-                perf_history["elapsed"].append(elapsed)
-                perf_history["leftover"].append(leftover)
-                
-                # Keep only last 20 measurements untuk smooth averaging
-                if len(perf_history["elapsed"]) > 20:
-                    perf_history["elapsed"].pop(0)
-                    perf_history["leftover"].pop(0)
-                
-                # Adjust fps_step setiap 10 steps
-                if st.session_state.step_count % 10 == 0 and st.session_state.step_count > 0:
-                    avg_elapsed = sum(perf_history["elapsed"]) / len(perf_history["elapsed"])
-                    avg_leftover = sum(perf_history["leftover"]) / len(perf_history["leftover"])
-                    
-                    # Hysteresis: hanya adjust kalau performance cukup jelas
-                    if avg_leftover > wall_step_budget * 0.2:  # >20% budget leftover
-                        # Ada banyak slack → coba increase fps_step
-                        if adaptive_fps_step < MAX_ADAPTIVE_FPSTEP:
-                            adaptive_fps_step += 1
-                    elif avg_leftover < wall_step_budget * 0.05 and avg_leftover < 0:  # Melebihi budget
-                        # Ketat sekali → decrease fps_step
-                        if adaptive_fps_step > MIN_ADAPTIVE_FPSTEP:
-                            adaptive_fps_step -= 1
-                
-                
-                
-                if leftover > 0:
-                    time.sleep(leftover)
+                frame_idx += 1
 
                 if not st.session_state.running:
                     break
 
-                st.session_state.step_count += 1
-                progress_bar.progress(st.session_state.step_count / cfg["max_steps"])
+                progress_bar.progress(min(sim_time_s / max_steps, 1.0))
 
         finally:
             renderer.close()
@@ -346,7 +247,7 @@ def panel_simulate(cfg: dict) -> None:
         st.session_state.running = False
         progress_bar.progress(1.0)
         ph_info.success(
-            f"Simulation finished at {cfg['max_steps']} steps. "
+            f"Simulation finished at {int(model.time_s)} s. "
             f"Total arrivals: {model.total_customers}."
         )
     else:
@@ -355,7 +256,7 @@ def panel_simulate(cfg: dict) -> None:
             render_static()
             
             # Tampilkan final heatmap saat stop atau selesai
-            if st.session_state.get("show_final_heatmap", False) or st.session_state.step_count >= cfg["max_steps"]:
+            if st.session_state.get("show_final_heatmap", False) or model.time_s >= max_steps:
                 # Generate fresh heatmap final
                 fig_final_hmap = plot_obstacle_heatmap(
                     st.session_state.model.obstacle_heatmap,
@@ -369,12 +270,12 @@ def panel_simulate(cfg: dict) -> None:
                     use_container_width=True
                 )
                 ph_info.success(
-                    f"✓ Simulation stopped at step {st.session_state.step_count}. "
+                    f"✓ Simulation stopped at {model.time_s:.1f} s. "
                     f"Total arrivals: {st.session_state.model.total_customers}."
                 )
-            elif st.session_state.step_count > 0:
+            elif model.time_s > 0:
                 ph_info.caption(
-                    f"⏸️ Paused at step {st.session_state.step_count}. Press Start to resume."
+                    f"Paused at {model.time_s:.1f} s. Press Start to resume."
                 )
             else:
                 ph_info.caption("Press **Start** to begin the simulation.")
@@ -395,7 +296,6 @@ def _handle_controls(cfg, width, height, layout):
             arrival_rate=cfg["arrival_rate"],
             mean_sitting_s=cfg["mean_sitting"],
             pass_through_prob=cfg["pass_through_prob"],
-            fps_step=cfg["fps_step"],  
             seed=cfg["seed"],
         )
 

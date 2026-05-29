@@ -17,6 +17,7 @@ from constants import (
     CELL_OBSTACLE,
     ChairDirections,
     Layout,
+    CHAIR_DIR_VECTORS,
     SPEED_PX_PER_S,
     DEFAULT_FPSTEP,
     CELL_SIZE_PX,
@@ -278,6 +279,14 @@ class WaitingRoomModel:
         if info and info.get("occupant") is human:
             info["occupied"] = False
             info["occupant"] = None
+
+    def get_chair_facing_angle(self, cell: Tuple[int, int]) -> float:
+        info = self._chairs.get(cell)
+        if not info:
+            return 0.0
+        direction = info.get("facing", "right")
+        vec = CHAIR_DIR_VECTORS.get(direction, CHAIR_DIR_VECTORS["right"])
+        return math.atan2(vec[1], vec[0])
 
     # ------------------------------------------------------------------
     # Door helpers

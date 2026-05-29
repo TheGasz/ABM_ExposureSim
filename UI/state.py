@@ -22,8 +22,8 @@ from constants import (
 
 def init_session() -> None:
     defaults = {
-        "grid_w": 22,
-        "grid_h": 22,
+        "grid_w": 13,
+        "grid_h": 13,
         "grid_state": None,
         "chair_directions": {},
         "door_probs": {},

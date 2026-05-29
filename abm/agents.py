@@ -89,6 +89,7 @@ class HumanAgent:
                 self.pos_px = self.model.cell_center_px(self.chair_cell)
                 self.last_reached_cell = self.chair_cell
                 self.status = HumanStatus.SITTING
+                self.facing_angle_rad = self.model.get_chair_facing_angle(self.chair_cell)
 
         elif self.status == HumanStatus.SITTING:
             self.sit_remaining_s -= dt
