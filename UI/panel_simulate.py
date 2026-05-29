@@ -157,6 +157,23 @@ def panel_simulate(cfg: dict) -> None:
     # Initialize heatmap cache
     if "fig_hmap_cache" not in st.session_state:
         st.session_state.fig_hmap_cache = None
+    if "heatmap_cache_time" not in st.session_state:
+        st.session_state.heatmap_cache_time = None
+
+    def render_heatmap() -> None:
+        cache_time = st.session_state.get("heatmap_cache_time")
+        if st.session_state.fig_hmap_cache is None or cache_time != model.time_s:
+            st.session_state.fig_hmap_cache = plot_obstacle_heatmap(
+                model.obstacle_heatmap,
+                layout,
+                width,
+                height,
+            )
+            st.session_state.heatmap_cache_time = model.time_s
+        ph_hmap.plotly_chart(
+            st.session_state.fig_hmap_cache,
+            use_container_width=True,
+        )
 
     def render_static():
         """Render sekali pakai untuk kondisi pause — pakai plot_sim_room biasa."""
@@ -187,7 +204,6 @@ def panel_simulate(cfg: dict) -> None:
         sim_dt = base_dt * speed_x
 
         renderer = SimRenderer(width, height, CELL_SIZE_PX)
-        frame_idx = 0
         try:
             while model.time_s < max_steps:
                 if not st.session_state.running:
@@ -220,22 +236,6 @@ def panel_simulate(cfg: dict) -> None:
                     f"· Active: {n_now}"
                 )
 
-                # --- Heatmap update ---
-                
-                st.session_state.fig_hmap_cache = plot_obstacle_heatmap(
-                    model.obstacle_heatmap, 
-                    layout, 
-                    width, 
-                    height,
-                    prev_fig=st.session_state.fig_hmap_cache
-                )
-                ph_hmap.plotly_chart(
-                    st.session_state.fig_hmap_cache,
-                    use_container_width=True,
-                    key=f"heatmap_frame_{frame_idx}"
-                )
-                frame_idx += 1
-
                 if not st.session_state.running:
                     break
 
@@ -246,6 +246,8 @@ def panel_simulate(cfg: dict) -> None:
 
         st.session_state.running = False
         progress_bar.progress(1.0)
+        if model.time_s >= max_steps:
+            render_heatmap()
         ph_info.success(
             f"Simulation finished at {int(model.time_s)} s. "
             f"Total arrivals: {model.total_customers}."
@@ -256,19 +258,10 @@ def panel_simulate(cfg: dict) -> None:
             render_static()
             
             # Tampilkan final heatmap saat stop atau selesai
+            if model.time_s > 0:
+                render_heatmap()
+
             if st.session_state.get("show_final_heatmap", False) or model.time_s >= max_steps:
-                # Generate fresh heatmap final
-                fig_final_hmap = plot_obstacle_heatmap(
-                    st.session_state.model.obstacle_heatmap,
-                    layout,
-                    width,
-                    height
-                )
-                # Render langsung, tidak perlu cache
-                ph_hmap.plotly_chart(
-                    fig_final_hmap, 
-                    use_container_width=True
-                )
                 ph_info.success(
                     f"✓ Simulation stopped at {model.time_s:.1f} s. "
                     f"Total arrivals: {st.session_state.model.total_customers}."
@@ -304,6 +297,8 @@ def _handle_controls(cfg, width, height, layout):
         st.session_state.step_count = 0
         st.session_state.running = True
         st.session_state.show_final_heatmap = False
+        st.session_state.fig_hmap_cache = None
+        st.session_state.heatmap_cache_time = None
     elif cfg["stop"]:
         st.session_state.running = False
         st.session_state.show_final_heatmap = True
@@ -313,6 +308,8 @@ def _handle_controls(cfg, width, height, layout):
         st.session_state.step_count = 0
         st.session_state.running = False
         st.session_state.show_final_heatmap = False
+        st.session_state.fig_hmap_cache = None
+        st.session_state.heatmap_cache_time = None
     
     # Initialize model hanya jika belum ada
     if st.session_state.model is None:
@@ -320,6 +317,8 @@ def _handle_controls(cfg, width, height, layout):
         st.session_state.step_count = 0
         st.session_state.running = False
         st.session_state.show_final_heatmap = False
+        st.session_state.fig_hmap_cache = None
+        st.session_state.heatmap_cache_time = None
 
 
 def _create_metric_placeholders():

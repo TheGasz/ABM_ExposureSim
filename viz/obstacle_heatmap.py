@@ -2,13 +2,34 @@
 viz/obstacle_heatmap.py
 =======================
 Visualisasi heatmap exposure per sisi obstacle.
-Optimized untuk menghindari flicker di Streamlit.
+Smoothing Viridis dengan midpoint interpolation.
 """
 
 import numpy as np # type: ignore
 import plotly.graph_objects as go # type: ignore
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 from constants import CELL_OBSTACLE
+
+BASE_LINE = "#2a2a4a"
+GRID_SCALE = 12
+SIGMA = 0.35
+MIDPOINT_DISTANCE = 1.0
+
+
+def _add_midpoints(points: List[Tuple[float, float, float]]) -> List[Tuple[float, float, float]]:
+    points_map = {(x, y): w for x, y, w in points}
+    midpoints: Dict[Tuple[float, float], float] = {}
+    for (x, y), w in points_map.items():
+        for dx, dy in ((MIDPOINT_DISTANCE, 0.0), (0.0, MIDPOINT_DISTANCE)):
+            neighbor = (x + dx, y + dy)
+            if neighbor in points_map:
+                mid = (x + dx * 0.5, y + dy * 0.5)
+                mid_w = (w + points_map[neighbor]) * 0.5
+                existing = midpoints.get(mid)
+                midpoints[mid] = mid_w if existing is None else max(existing, mid_w)
+    combined = [(x, y, w) for (x, y), w in points_map.items()]
+    combined.extend((x, y, w) for (x, y), w in midpoints.items())
+    return combined
 
 
 def plot_obstacle_heatmap(
@@ -18,7 +39,7 @@ def plot_obstacle_heatmap(
     height: int,
     prev_fig: Optional[go.Figure] = None,
 ) -> go.Figure:
-    """Plot heatmap per sisi obstacle.
+    """Plot heatmap per sisi obstacle (empat sisi).
     
     Parameters
     ----------
@@ -29,7 +50,7 @@ def plot_obstacle_heatmap(
     width, height : int
         Grid dimensions
     prev_fig : Optional[go.Figure]
-        Figure sebelumnya untuk update (hindari flicker). Jika None, buat baru.
+        Parameter legacy (diabaikan), disisakan untuk kompatibilitas.
     
     Returns
     -------
@@ -37,121 +58,118 @@ def plot_obstacle_heatmap(
         Plotly heatmap visualization
     """
 
-    # Initialize heatmap data dengan NaN (sel non-obstacle = transparan)
-    heatmap_data = np.full((height, width), np.nan)
+    obstacle_cells = [
+        (col, row)
+        for (col, row), cell_type in layout.items()
+        if cell_type == CELL_OBSTACLE and 0 <= row < height and 0 <= col < width
+    ]
 
-    # Tandai semua obstacle dengan 0 dulu
-    for (col, row), cell_type in layout.items():
-        if cell_type == CELL_OBSTACLE and 0 <= row < height and 0 <= col < width:
-            heatmap_data[row, col] = 0.0
+    side_points: Dict[str, List[Tuple[float, float, float]]] = {
+        "top": [],
+        "right": [],
+        "bottom": [],
+        "left": [],
+    }
 
-    if not obstacle_heatmap:
-        # Tampilkan grid dengan obstacle tapi semua weight = 0
-        if prev_fig is not None:
-            # Update existing figure
-            flat_data = heatmap_data.flatten()
-            flat_data = np.where(np.isnan(flat_data), None, flat_data)
-            prev_fig.update_traces(z=heatmap_data)
-            return prev_fig
-        
-        fig = go.Figure(data=go.Heatmap(
-            z=heatmap_data,
-            colorscale=[[0.0, "#2a2a4a"], [1.0, "#2a2a4a"]],
-            showscale=False,
+    hover_x = []
+    hover_y = []
+    hover_text = []
+    shapes = []
+
+    for (col, row) in obstacle_cells:
+        x0 = float(col)
+        y0 = float(row)
+        xc = x0 + 0.5
+        yc = y0 + 0.5
+
+        weights = obstacle_heatmap.get((col, row), {})
+        top_w = float(weights.get("top", 0.0))
+        right_w = float(weights.get("right", 0.0))
+        bottom_w = float(weights.get("bottom", 0.0))
+        left_w = float(weights.get("left", 0.0))
+
+        if top_w > 0:
+            side_points["top"].append((xc, y0, top_w))
+        if right_w > 0:
+            side_points["right"].append((x0 + 1.0, yc, right_w))
+        if bottom_w > 0:
+            side_points["bottom"].append((xc, y0 + 1.0, bottom_w))
+        if left_w > 0:
+            side_points["left"].append((x0, yc, left_w))
+
+        total = top_w + right_w + bottom_w + left_w
+        sides_str = " | ".join(
+            part
+            for part in [
+                f"top: {top_w:.1f}" if top_w > 0 else "",
+                f"right: {right_w:.1f}" if right_w > 0 else "",
+                f"bottom: {bottom_w:.1f}" if bottom_w > 0 else "",
+                f"left: {left_w:.1f}" if left_w > 0 else "",
+            ]
+            if part
+        ) or "no exposure"
+
+        hover_x.append(xc)
+        hover_y.append(yc)
+        hover_text.append(
+            f"<b>Obstacle ({col}, {row})</b><br>"
+            f"Total: {total:.1f}<br>"
+            f"{sides_str}"
+        )
+
+        shapes.append(
+            dict(
+                type="rect",
+                xref="x",
+                yref="y",
+                x0=x0,
+                x1=x0 + 1.0,
+                y0=y0,
+                y1=y0 + 1.0,
+                line=dict(color=BASE_LINE, width=1),
+                fillcolor="rgba(0,0,0,0)",
+            )
+        )
+
+    all_points: List[Tuple[float, float, float]] = []
+    for points in side_points.values():
+        if points:
+            all_points.extend(_add_midpoints(points))
+
+    nx = max(2, int(width * GRID_SCALE))
+    ny = max(2, int(height * GRID_SCALE))
+    x = np.linspace(0.0, float(width), nx)
+    y = np.linspace(0.0, float(height), ny)
+    X, Y = np.meshgrid(x, y)
+
+    field = np.zeros((ny, nx), dtype=float)
+    for px, py, weight in all_points:
+        d2 = (X - px) ** 2 + (Y - py) ** 2
+        field += weight * np.exp(-d2 / (2.0 * SIGMA ** 2))
+
+    max_val = float(np.max(field)) if field.size else 0.0
+    if max_val > 0:
+        field = field / max_val
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=field,
+            x=x,
+            y=y,
+            colorscale="Viridis",
             zmin=0,
             zmax=1,
-            hovertemplate="Col %{x}, Row %{y}<extra>No data yet</extra>",
-        ))
-        fig.update_layout(
-            title=dict(
-                text="🔥 Obstacle Exposure Heatmap",
-                font=dict(color="white", size=13, family="monospace"),
-            ),
-            paper_bgcolor="#0d0d1a",
-            plot_bgcolor="#0d0d1a",
-            xaxis=dict(showgrid=False, zeroline=False, color="#666"),
-            yaxis=dict(showgrid=False, zeroline=False, color="#666", autorange="reversed"),
-            margin=dict(l=40, r=20, t=50, b=40),
-            height=400,
-            # Disable animations for faster rendering
-            transition_duration=0,
-        )
-        return fig
-
-    # Hitung total weight per obstacle
-    all_totals = []
-    for (col, row), side_weights in obstacle_heatmap.items():
-        if 0 <= row < height and 0 <= col < width and side_weights:
-            total = sum(side_weights.values())
-            heatmap_data[row, col] = total
-            all_totals.append(total)
-
-    max_weight = max(all_totals) if all_totals else 1.0
-    max_weight = max(max_weight, 1.0)
-
-    # Buat hover text
-    hover_text = [[""] * width for _ in range(height)]
-    for (col, row), side_weights in obstacle_heatmap.items():
-        if 0 <= row < height and 0 <= col < width and side_weights:
-            total = sum(side_weights.values())
-            sides_str = " | ".join(
-                f"{s}: {v:.1f}" for s, v in side_weights.items() if v > 0
-            ) or "no exposure"
-            hover_text[row][col] = (
-                f"<b>Obstacle ({col}, {row})</b><br>"
-                f"Total: {total:.1f}<br>"
-                f"{sides_str}"
-            )
-
-    # Update existing figure jika ada (lebih cepat, hindari flicker)
-    if prev_fig is not None:
-        prev_fig.update_traces(
-            z=heatmap_data,
-            customdata=hover_text,
-            zmin=0,
-            zmax=max_weight,
-        )
-        # Update colorbar tickvals
-        colorbar_ticks = [0, max_weight * 0.25, max_weight * 0.5, max_weight * 0.75, max_weight]
-        prev_fig.update_traces(
             colorbar=dict(
                 title=dict(text="Exposure", font=dict(color="white", size=11)),
                 tickfont=dict(color="white"),
-                tickvals=colorbar_ticks,
-                ticktext=["0", "25%", "50%", "75%", f"{max_weight:.1f}"],
                 len=0.75,
                 thickness=14,
-            )
+            ),
+            hovertemplate="Exposure: %{z:.2f}<extra></extra>",
+            showscale=True,
+            zsmooth="best",
         )
-        return prev_fig
-
-    # Create new figure (first time)
-    fig = go.Figure(data=go.Heatmap(
-        z=heatmap_data,
-        colorscale=[
-            [0.0,  "#1e1e3a"],
-            [0.05, "#0f3460"],
-            [0.25, "#1a6fa8"],
-            [0.5,  "#2ecc71"],
-            [0.75, "#f39c12"],
-            [0.9,  "#e74c3c"],
-            [1.0,  "#c0392b"],
-        ],
-        zmin=0,
-        zmax=max_weight,
-        colorbar=dict(
-            title=dict(text="Exposure", font=dict(color="white", size=11)),
-            tickfont=dict(color="white"),
-            tickvals=[0, max_weight * 0.25, max_weight * 0.5, max_weight * 0.75, max_weight],
-            ticktext=["0", "25%", "50%", "75%", f"{max_weight:.1f}"],
-            len=0.75,
-            thickness=14,
-        ),
-        hoverongaps=False,
-        hovertemplate="%{customdata}<extra></extra>",
-        customdata=hover_text,
-        connectgaps=False,
-    ))
+    )
 
     fig.update_layout(
         title=dict(
@@ -162,23 +180,36 @@ def plot_obstacle_heatmap(
         paper_bgcolor="#0d0d1a",
         plot_bgcolor="#0d0d1a",
         xaxis=dict(
-            title=dict(text="Column", font=dict(color="#888")),
             showgrid=False,
             zeroline=False,
             tickfont=dict(color="#666"),
+            range=[0, width],
+            constrain="domain",
         ),
         yaxis=dict(
-            title=dict(text="Row", font=dict(color="#888")),
             showgrid=False,
             zeroline=False,
             tickfont=dict(color="#666"),
+            range=[0, height],
             autorange="reversed",
+            scaleanchor="x",
         ),
         margin=dict(l=40, r=20, t=50, b=40),
         height=400,
-        # Disable animations untuk smooth rendering tanpa flicker
-        transition_duration=0,
-        transition_easing="cubic-in-out",
+        shapes=shapes,
     )
+
+    if hover_x:
+        fig.add_trace(
+            go.Scatter(
+                x=hover_x,
+                y=hover_y,
+                mode="markers",
+                marker=dict(size=6, color="rgba(0,0,0,0)"),
+                text=hover_text,
+                hovertemplate="%{text}<extra></extra>",
+                showlegend=False,
+            )
+        )
 
     return fig
