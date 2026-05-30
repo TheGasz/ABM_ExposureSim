@@ -349,9 +349,24 @@ def _render_quick_tools(gs, width, height):
     )
 
     st.divider()
-    uploaded = st.file_uploader("Import Room JSON", type="json", label_visibility="collapsed")
-    if uploaded:
-        _import_layout_json(uploaded, width, height)
+    # Pakai key counter supaya widget reset (file hilang) setelah import berhasil.
+    # Tanpa ini, Streamlit menyimpan file di session dan memanggil _import_layout_json
+    # lagi di setiap rerun berikutnya (termasuk saat Stop ditekan), yang me-reset model.
+    if "file_uploader_key" not in st.session_state:
+        st.session_state.file_uploader_key = 0
+
+    uploaded = st.file_uploader(
+        "Import Room JSON",
+        type="json",
+        label_visibility="collapsed",
+        key=f"room_json_uploader_{st.session_state.file_uploader_key}",
+    )
+    if uploaded is not None:
+        ok = _import_layout_json(uploaded, width, height)
+        if ok:
+            # Increment key → widget dapat key baru → file otomatis hilang
+            st.session_state.file_uploader_key += 1
+            st.rerun()
 
 
 def _add_random_elements(cell_type, n):
@@ -405,7 +420,8 @@ def _load_demo_layout():
     st.session_state.grid_state = gs
 
 
-def _import_layout_json(uploaded_file, width, height):
+def _import_layout_json(uploaded_file, width, height) -> bool:
+    """Import layout dari JSON. Return True jika berhasil, False jika gagal."""
     try:
         raw = json.load(uploaded_file)
         grid_info = raw.get("grid", {}) if isinstance(raw, dict) else {}
@@ -486,5 +502,16 @@ def _import_layout_json(uploaded_file, width, height):
 
             st.session_state.sim_config = sim_config
         st.session_state.model = None
+        # Reset running/paused agar simulasi lama tidak carry-over ke layout baru
+        st.session_state.running = False
+        st.session_state.paused = False
+        st.session_state.show_final_heatmap = False
+        st.success(f"✅ Layout berhasil diimport ({new_w}x{new_h} cells).")
+        return True
     except json.JSONDecodeError:
         st.error("Invalid JSON file.")
+        return False
+    except Exception as e:
+        st.error(f"Gagal import: {e}")
+        return False
+

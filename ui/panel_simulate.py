@@ -113,10 +113,11 @@ def build_sidebar_sim() -> dict:
         )
 
         st.divider()
-        col_start, col_stop = st.columns(2)
-        start = col_start.button("Start", use_container_width=True, type="primary")
-        stop = col_stop.button("Stop", use_container_width=True)
-        reset = st.button("Reset Simulation", use_container_width=True)
+        col_start, col_pause, col_stop = st.columns(3)
+        start = col_start.button("▶ Start", use_container_width=True, type="primary")
+        pause = col_pause.button("⏸ Pause", use_container_width=True)
+        stop = col_stop.button("⏹ Stop", use_container_width=True)
+        reset = st.button("↺ Reset Simulation", use_container_width=True)
 
     return dict(
         arrival_rate=arrival_rate,
@@ -126,6 +127,7 @@ def build_sidebar_sim() -> dict:
         max_steps=int(max_steps),
         seed=int(seed),
         start=start,
+        pause=pause,
         stop=stop,
         reset_sim=reset,
     )
@@ -374,17 +376,24 @@ def panel_simulate(cfg: dict) -> None:
             if model.time_s > 0:
                 render_heatmap(force=True, show_details=model.time_s >= max_steps)
 
+            is_paused_state = st.session_state.get("paused", False)
             if st.session_state.get("show_final_heatmap", False) or model.time_s >= max_steps:
                 ph_info.success(
-                    f"✓ Simulation stopped at {model.time_s:.1f} s. "
-                    f"Total arrivals: {st.session_state.model.total_customers}."
+                    f"⏹ Simulation stopped at {model.time_s:.1f} s. "
+                    f"Total arrivals: {st.session_state.model.total_customers}. "
+                    f"Press **▶ Start** to run a new simulation."
+                )
+            elif is_paused_state and model.time_s > 0:
+                ph_info.info(
+                    f"⏸ Paused at {model.time_s:.1f} s. "
+                    f"Press **▶ Start** to resume."
                 )
             elif model.time_s > 0:
                 ph_info.caption(
-                    f"Paused at {model.time_s:.1f} s. Press Start to resume."
+                    f"Stopped at {model.time_s:.1f} s. Press **▶ Start** to run new simulation."
                 )
             else:
-                ph_info.caption("Press **Start** to begin the simulation.")
+                ph_info.caption("Press **▶ Start** to begin the simulation.")
         else:
             ph_info.warning(
                 "⚠️ Model belum di-initialize. Tekan **Start** untuk memulai simulasi."
@@ -421,20 +430,38 @@ def _handle_controls(cfg, width, height, layout):
         st.session_state.heatmap_plotly_version = -1
         _shutdown_heatmap_render_state()
 
+    is_paused = st.session_state.get("paused", False)
+
     if cfg["start"]:
-        st.session_state.model = _new_model()
-        st.session_state.step_count = 0
-        st.session_state.running = True
-        st.session_state.show_final_heatmap = False
-        _reset_heatmap_state()
-    elif cfg["stop"]:
+        if is_paused and st.session_state.model is not None:
+            # Resume dari pause — lanjutkan model yang sama
+            st.session_state.running = True
+            st.session_state.paused = False
+            st.session_state.show_final_heatmap = False
+        else:
+            # Fresh start — buat model baru
+            st.session_state.model = _new_model()
+            st.session_state.step_count = 0
+            st.session_state.running = True
+            st.session_state.paused = False
+            st.session_state.show_final_heatmap = False
+            _reset_heatmap_state()
+    elif cfg["pause"]:
+        # Pause: hentikan loop tapi jangan reset model
         st.session_state.running = False
+        st.session_state.paused = True
+        st.session_state.show_final_heatmap = False
+    elif cfg["stop"]:
+        # Stop: hentikan loop, tandai selesai, JANGAN panggil st.rerun()
+        # Loop while memeriksa st.session_state.running tiap iterasi dan akan break sendiri
+        st.session_state.running = False
+        st.session_state.paused = False
         st.session_state.show_final_heatmap = True
-        st.rerun()
     elif cfg["reset_sim"]:
         st.session_state.model = _new_model()
         st.session_state.step_count = 0
         st.session_state.running = False
+        st.session_state.paused = False
         st.session_state.show_final_heatmap = False
         _reset_heatmap_state()
 
@@ -442,6 +469,7 @@ def _handle_controls(cfg, width, height, layout):
         st.session_state.model = _new_model()
         st.session_state.step_count = 0
         st.session_state.running = False
+        st.session_state.paused = False
         st.session_state.show_final_heatmap = False
         _reset_heatmap_state()
 
