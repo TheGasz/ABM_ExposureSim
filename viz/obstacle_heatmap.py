@@ -10,12 +10,14 @@ Opsi 2 + 3:
 - Gaussian blur via scipy.ndimage.gaussian_filter (O(n) vs O(n * points)).
 """
 
+import io
+from typing import Dict, Tuple, Optional
+
 import numpy as np  # type: ignore
 import matplotlib  # type: ignore
 import matplotlib.pyplot as plt  # type: ignore
 import matplotlib.colors as mcolors  # type: ignore
 from scipy.ndimage import gaussian_filter  # type: ignore
-from typing import Dict, Tuple, Optional
 
 from constants import CELL_OBSTACLE
 
@@ -61,6 +63,7 @@ class ExposureField:
         self._field = np.zeros((ny, nx), dtype=np.float32)
         self._dirty = True  # perlu re-blur?
         self._blurred: Optional[np.ndarray] = None
+        self._version = 0
 
     # ------------------------------------------------------------------ #
     # Side → pixel koordinat di dalam field array                         #
@@ -89,6 +92,13 @@ class ExposureField:
         iy, ix = self._side_pixel(col, row, side)
         self._field[iy, ix] += weight
         self._dirty = True
+        self._version += 1
+
+    def get_version(self) -> int:
+        return self._version
+
+    def get_raw_copy(self) -> np.ndarray:
+        return self._field.copy()
 
     def get_blurred(self) -> np.ndarray:
         """Return normalized blurred field. Blur hanya dihitung ulang jika dirty."""
@@ -103,6 +113,7 @@ class ExposureField:
         self._field[:] = 0.0
         self._blurred = None
         self._dirty = True
+        self._version = 0
 
     # ------------------------------------------------------------------ #
     # Rebuild dari obstacle_heatmap dict (fallback / backward-compat)     #
@@ -125,6 +136,119 @@ class ExposureField:
                 if weight > 0:
                     ef.record(col, row, side, weight)
         return ef
+
+
+def _empty_field(width: int, height: int) -> np.ndarray:
+    return np.zeros((max(2, height * GRID_SCALE), max(2, width * GRID_SCALE)), dtype=np.float32)
+
+
+def build_blurred_field_from_raw(raw_field: np.ndarray) -> np.ndarray:
+    blurred = gaussian_filter(raw_field, sigma=BLUR_SIGMA)
+    max_val = blurred.max()
+    return blurred / max_val if max_val > 0 else blurred
+
+
+def build_obstacle_heatmap_field(
+    obstacle_heatmap: Dict[Tuple[int, int], Dict[str, float]],
+    width: int,
+    height: int,
+    exposure_field: Optional[ExposureField] = None,
+) -> np.ndarray:
+    if exposure_field is not None:
+        return exposure_field.get_blurred()
+    if obstacle_heatmap:
+        ef = ExposureField.from_heatmap_dict(obstacle_heatmap, width, height)
+        return ef.get_blurred()
+    return _empty_field(width, height)
+
+
+class HeatmapRenderer:
+    """Renderer matplotlib yang reuse figure agar update cepat."""
+
+    def __init__(self, width: int, height: int, layout: Dict[Tuple[int, int], int]) -> None:
+        self.width = width
+        self.height = height
+        self.layout = layout
+
+        field = _empty_field(width, height)
+        self.fig, self.ax = plt.subplots(figsize=(4.2, 4.2), facecolor=BG_COLOR)
+        self.ax.set_facecolor(BG_COLOR)
+
+        self._im = self.ax.imshow(
+            field,
+            origin="upper",
+            cmap=COLORMAP,
+            vmin=0.0,
+            vmax=1.0,
+            extent=[0, width, height, 0],
+            interpolation="bilinear",
+            aspect="equal",
+        )
+
+        cbar = self.fig.colorbar(self._im, ax=self.ax, fraction=0.035, pad=0.02)
+        cbar.set_label("Exposure", color="white", fontsize=8)
+        cbar.ax.yaxis.set_tick_params(color="white", labelcolor="white", labelsize=7)
+
+        obstacle_cells = [
+            (col, row)
+            for (col, row), cell_type in layout.items()
+            if cell_type == CELL_OBSTACLE and 0 <= row < height and 0 <= col < width
+        ]
+        for (col, row) in obstacle_cells:
+            rect = plt.Rectangle(
+                (col, row), 1, 1,
+                linewidth=0.7,
+                edgecolor=OBSTACLE_EDGE,
+                facecolor="none",
+            )
+            self.ax.add_patch(rect)
+
+        self.ax.set_xlim(0, width)
+        self.ax.set_ylim(height, 0)
+        self.ax.tick_params(colors="#555555", labelsize=7)
+        for spine in self.ax.spines.values():
+            spine.set_edgecolor("#333355")
+
+        self.ax.set_title("🔥 Obstacle Exposure Heatmap", color="white", fontsize=9,
+                          fontfamily="monospace", loc="left", pad=6)
+
+        self.fig.tight_layout(pad=0.4)
+
+    def render(self, field: np.ndarray) -> bytes:
+        self._im.set_data(field)
+        buf = io.BytesIO()
+        self.fig.savefig(buf, format="png", dpi=90, bbox_inches="tight")
+        buf.seek(0)
+        return buf.getvalue()
+
+    def close(self) -> None:
+        plt.close(self.fig)
+
+
+class HeatmapRenderWorker:
+    """Worker untuk render heatmap di thread terpisah."""
+
+    def __init__(self, width: int, height: int, layout: Dict[Tuple[int, int], int]) -> None:
+        self.width = width
+        self.height = height
+        self.layout = layout
+        self._renderer: Optional[HeatmapRenderer] = None
+        self._layout_signature: Optional[int] = None
+
+    def render(self, raw_field: np.ndarray, layout_signature: int) -> bytes:
+        if self._renderer is None or layout_signature != self._layout_signature:
+            if self._renderer is not None:
+                self._renderer.close()
+            self._renderer = HeatmapRenderer(self.width, self.height, self.layout)
+            self._layout_signature = layout_signature
+
+        field = build_blurred_field_from_raw(raw_field)
+        return self._renderer.render(field)
+
+    def close(self) -> None:
+        if self._renderer is not None:
+            self._renderer.close()
+            self._renderer = None
 
 
 # ---------------------------------------------------------------------------
@@ -159,13 +283,7 @@ def plot_obstacle_heatmap(
     matplotlib.figure.Figure
     """
     # --- Ambil / build blurred field ---
-    if exposure_field is not None:
-        field = exposure_field.get_blurred()
-    elif obstacle_heatmap:
-        ef = ExposureField.from_heatmap_dict(obstacle_heatmap, width, height)
-        field = ef.get_blurred()
-    else:
-        field = np.zeros((max(2, height * GRID_SCALE), max(2, width * GRID_SCALE)), dtype=np.float32)
+    field = build_obstacle_heatmap_field(obstacle_heatmap, width, height, exposure_field)
 
     # --- Figure setup ---
     fig, ax = plt.subplots(figsize=(4.2, 4.2), facecolor=BG_COLOR)

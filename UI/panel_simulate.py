@@ -4,24 +4,23 @@ ui/panel_simulate.py
 Simulation panel for running the ABM and visualizing movement.
 
 Perubahan vs versi lama:
-- Heatmap render via matplotlib (plot_obstacle_heatmap) bukan Plotly.
+- Heatmap render via matplotlib (PNG) dan di-cache di session_state.
 - ExposureField dipakai sebagai incremental accumulator; diinit ulang tiap
-  Start/Reset dan dipassing ke plot_obstacle_heatmap agar blur hanya dihitung
-  saat ada perubahan (flag dirty).
-- render_heatmap() pakai ph_hmap.pyplot() konsisten dengan render_static().
-- Interval refresh heatmap saat live: HEATMAP_REFRESH_INTERVAL detik sim-time
-  agar tidak rebuild tiap step.
+    Start/Reset agar field tidak rebuild tiap step.
+- render_heatmap() offload ke thread worker dan update via placeholder image.
+- Interval refresh heatmap saat live: HEATMAP_REFRESH_INTERVAL detik sim-time.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 from viz.sim_plots import plot_sim_room, SimRenderer
-from viz.obstacle_heatmap import plot_obstacle_heatmap, ExposureField
+from viz.obstacle_heatmap import ExposureField, HeatmapRenderWorker
 import matplotlib.pyplot as plt  # type: ignore
 import streamlit as st  # type: ignore
 
 from abm.model import WaitingRoomModel
 from constants import CELL_CHAIR, CELL_SIZE_PX, DEFAULT_DT_S
 from ui.state import grid_state_to_layout, get_chair_directions
-from viz.sim_plots import plot_sim_room, SimRenderer
 
 # ---------------------------------------------------------------------------
 # Konstanta
@@ -149,6 +148,8 @@ def panel_simulate(cfg: dict) -> None:
     model: WaitingRoomModel = st.session_state.model
     max_steps = float(cfg["max_steps"])
 
+    _ensure_heatmap_render_state(width, height, layout)
+
     st.session_state.sim_config = {
         "arrival_rate": cfg["arrival_rate"],
         "mean_sitting": cfg["mean_sitting"],
@@ -175,6 +176,10 @@ def panel_simulate(cfg: dict) -> None:
     # --- Session state untuk heatmap cache ---
     if "heatmap_cache_time" not in st.session_state:
         st.session_state.heatmap_cache_time = -1.0
+    if "heatmap_last_version" not in st.session_state:
+        st.session_state.heatmap_last_version = -1
+    if "heatmap_png_cache" not in st.session_state:
+        st.session_state.heatmap_png_cache = None
 
     # ExposureField hidup di session_state agar persist antar rerun
     if "exposure_field" not in st.session_state or st.session_state.exposure_field is None:
@@ -193,40 +198,49 @@ def panel_simulate(cfg: dict) -> None:
         - force=True (misal: setelah simulasi selesai), atau
         - sudah lewat HEATMAP_REFRESH_INTERVAL sejak render terakhir.
 
-        ExposureField.get_blurred() sendiri sudah lazy (hanya blur ulang
-        jika dirty), jadi aman dipanggil lebih sering.
+        Rendering di-offload ke worker dan hasil PNG di-cache.
         """
+        _collect_heatmap_future()
+
+        if st.session_state.heatmap_png_cache is not None:
+            ph_hmap.image(st.session_state.heatmap_png_cache, use_container_width=True)
+
         last_render = st.session_state.heatmap_cache_time
         elapsed = model.time_s - last_render
         if not force and elapsed < HEATMAP_REFRESH_INTERVAL:
             return
 
-        # Sync ExposureField dari obstacle_heatmap dict jika model tidak
-        # punya atribut exposure_field sendiri (backward-compat).
         source_ef = getattr(model, "exposure_field", None)
-        if source_ef is not None:
-            # Model sudah pakai ExposureField incremental — langsung pakai
-            fig = plot_obstacle_heatmap(
-                model.obstacle_heatmap,
-                layout,
-                width,
-                height,
-                exposure_field=source_ef,
-            )
-        else:
-            # Fallback: rebuild dari dict (lebih lambat, tapi tetap pakai
-            # matplotlib + gaussian_filter — jauh lebih cepat dari versi lama)
-            fig = plot_obstacle_heatmap(
-                model.obstacle_heatmap,
-                layout,
-                width,
-                height,
-                exposure_field=ef,
-            )
+        if source_ef is None:
+            _sync_exposure_field(ef, model.obstacle_heatmap)
+            source_ef = ef
 
-        ph_hmap.pyplot(fig, use_container_width=True)
-        plt.close(fig)
+        current_version = source_ef.get_version()
+        if not force and current_version == st.session_state.heatmap_last_version:
+            return
+
+        layout_sig = st.session_state.heatmap_layout_signature
+        worker = st.session_state.heatmap_worker
+        if force:
+            raw_field = source_ef.get_raw_copy()
+            st.session_state.heatmap_png_cache = worker.render(raw_field, layout_sig)
+            ph_hmap.image(st.session_state.heatmap_png_cache, use_container_width=True)
+            st.session_state.heatmap_cache_time = model.time_s
+            st.session_state.heatmap_last_version = current_version
+            return
+
+        if st.session_state.heatmap_future is not None:
+            return
+
+        raw_field = source_ef.get_raw_copy()
+        executor = st.session_state.heatmap_executor
+        st.session_state.heatmap_future = executor.submit(
+            worker.render,
+            raw_field,
+            layout_sig,
+        )
         st.session_state.heatmap_cache_time = model.time_s
+        st.session_state.heatmap_last_version = current_version
 
     # ------------------------------------------------------------------ #
     # Render statis (pause / stop)                                         #
@@ -368,6 +382,9 @@ def _handle_controls(cfg, width, height, layout):
     def _reset_heatmap_state():
         st.session_state.heatmap_cache_time = -1.0
         st.session_state.exposure_field = ExposureField(width, height)
+        st.session_state.heatmap_last_version = -1
+        st.session_state.heatmap_png_cache = None
+        _shutdown_heatmap_render_state()
 
     if cfg["start"]:
         st.session_state.model = _new_model()
@@ -416,6 +433,58 @@ def _sync_exposure_field(
         for side, weight in sides.items():
             if weight > 0:
                 ef.record(col, row, side, weight)
+
+
+def _layout_signature(layout: dict, width: int, height: int) -> int:
+    items = tuple(sorted(layout.items()))
+    return hash((width, height, items))
+
+
+def _ensure_heatmap_render_state(width: int, height: int, layout: dict) -> None:
+    layout_sig = _layout_signature(layout, width, height)
+    if st.session_state.get("heatmap_layout_signature") != layout_sig:
+        _shutdown_heatmap_render_state()
+        st.session_state.heatmap_layout_signature = layout_sig
+
+    if st.session_state.get("heatmap_executor") is None:
+        st.session_state.heatmap_executor = ThreadPoolExecutor(max_workers=1)
+    if st.session_state.get("heatmap_worker") is None:
+        st.session_state.heatmap_worker = HeatmapRenderWorker(width, height, layout)
+    if "heatmap_future" not in st.session_state:
+        st.session_state.heatmap_future = None
+    if "heatmap_png_cache" not in st.session_state:
+        st.session_state.heatmap_png_cache = None
+
+
+def _shutdown_heatmap_render_state() -> None:
+    future = st.session_state.get("heatmap_future")
+    if future is not None:
+        st.session_state.heatmap_future = None
+
+    worker = st.session_state.get("heatmap_worker")
+    if worker is not None:
+        worker.close()
+        st.session_state.heatmap_worker = None
+
+    executor = st.session_state.get("heatmap_executor")
+    if executor is not None:
+        executor.shutdown(wait=False)
+        st.session_state.heatmap_executor = None
+
+    st.session_state.heatmap_layout_signature = None
+    st.session_state.heatmap_png_cache = None
+    st.session_state.heatmap_last_version = -1
+
+
+def _collect_heatmap_future() -> None:
+    future = st.session_state.get("heatmap_future")
+    if future is None or not future.done():
+        return
+
+    try:
+        st.session_state.heatmap_png_cache = future.result()
+    finally:
+        st.session_state.heatmap_future = None
 
 
 def _create_metric_placeholders():
