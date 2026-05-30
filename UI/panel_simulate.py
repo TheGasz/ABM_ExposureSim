@@ -2,24 +2,42 @@
 ui/panel_simulate.py
 ====================
 Simulation panel for running the ABM and visualizing movement.
+
+Perubahan vs versi lama:
+- Heatmap render via matplotlib (plot_obstacle_heatmap) bukan Plotly.
+- ExposureField dipakai sebagai incremental accumulator; diinit ulang tiap
+  Start/Reset dan dipassing ke plot_obstacle_heatmap agar blur hanya dihitung
+  saat ada perubahan (flag dirty).
+- render_heatmap() pakai ph_hmap.pyplot() konsisten dengan render_static().
+- Interval refresh heatmap saat live: HEATMAP_REFRESH_INTERVAL detik sim-time
+  agar tidak rebuild tiap step.
 """
 
 from viz.sim_plots import plot_sim_room, SimRenderer
-from viz.obstacle_heatmap import plot_obstacle_heatmap
-import matplotlib.pyplot as plt # type: ignore
-import streamlit as st # type: ignore
+from viz.obstacle_heatmap import plot_obstacle_heatmap, ExposureField
+import matplotlib.pyplot as plt  # type: ignore
+import streamlit as st  # type: ignore
 
 from abm.model import WaitingRoomModel
 from constants import CELL_CHAIR, CELL_SIZE_PX, DEFAULT_DT_S
 from ui.state import grid_state_to_layout, get_chair_directions
 from viz.sim_plots import plot_sim_room, SimRenderer
 
-# Simulation speed multiplier (hanya mempengaruhi wall-clock, bukan kecepatan agen)
+# ---------------------------------------------------------------------------
+# Konstanta
+# ---------------------------------------------------------------------------
 MIN_SPEED = 1
 MAX_SPEED = 5
-# Fixed simulation timestep (detik simulasi per update)
 SIM_DT_S = DEFAULT_DT_S
 
+# Seberapa sering heatmap di-refresh saat simulasi berjalan (detik sim-time).
+# Naikkan nilai ini jika masih terasa berat; turunkan untuk update lebih sering.
+HEATMAP_REFRESH_INTERVAL = 5.0
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
 
 def build_sidebar_sim() -> dict:
     with st.sidebar:
@@ -113,6 +131,10 @@ def build_sidebar_sim() -> dict:
     )
 
 
+# ---------------------------------------------------------------------------
+# Panel utama
+# ---------------------------------------------------------------------------
+
 def panel_simulate(cfg: dict) -> None:
     width = st.session_state.grid_w
     height = st.session_state.grid_h
@@ -137,79 +159,106 @@ def panel_simulate(cfg: dict) -> None:
     }
 
     ph_step, ph_active, ph_sit, ph_pass, ph_total = _create_metric_placeholders()
-    
-    # Plot placeholders — 2 kolom
+
     col_room, col_heat = st.columns([1.2, 1], gap="medium")
-    
     with col_room:
-        st.markdown("####  Room State")
+        st.markdown("#### 🗺️ Room State")
         ph_room = st.empty()
-    
     with col_heat:
-        st.markdown("####  Obstacle Heatmap")
+        st.markdown("#### 🔥 Obstacle Heatmap")
         ph_hmap = st.empty()
-    
+
     current_time = model.time_s if model is not None else 0.0
     progress_bar = st.progress(min(current_time / max(max_steps, 1.0), 1.0))
     ph_info = st.empty()
-    
-    
-    # Initialize heatmap cache
-    if "fig_hmap_cache" not in st.session_state:
-        st.session_state.fig_hmap_cache = None
-    if "last_heatmap_interval" not in st.session_state:
-        st.session_state.last_heatmap_interval = -1
 
-    HEATMAP_UPDATE_INTERVAL = 10  # Update heatmap setiap 10 steps
+    # --- Session state untuk heatmap cache ---
+    if "heatmap_cache_time" not in st.session_state:
+        st.session_state.heatmap_cache_time = -1.0
 
-    def render_heatmap() -> None:
-        """Update dan render heatmap"""
-        st.session_state.fig_hmap_cache = plot_obstacle_heatmap(
-            model.obstacle_heatmap,
-            layout,
-            width,
-            height,
-        )
-        ph_hmap.plotly_chart(
-            st.session_state.fig_hmap_cache,
-            use_container_width=True,
-        )
+    # ExposureField hidup di session_state agar persist antar rerun
+    if "exposure_field" not in st.session_state or st.session_state.exposure_field is None:
+        st.session_state.exposure_field = ExposureField(width, height)
 
-    def should_update_heatmap() -> bool:
-        """Check jika sudah saatnya update heatmap (setiap 10 step berdasarkan model time)"""
-        current_interval = int(model.time_s / HEATMAP_UPDATE_INTERVAL)
-        if current_interval > st.session_state.last_heatmap_interval:
-            st.session_state.last_heatmap_interval = current_interval
-            return True
-        return False
+    ef: ExposureField = st.session_state.exposure_field
 
-    def render_static():
-        """Render sekali pakai untuk kondisi pause — pakai plot_sim_room biasa."""
+    # ------------------------------------------------------------------ #
+    # Helper render heatmap                                                #
+    # ------------------------------------------------------------------ #
+
+    def render_heatmap(force: bool = False) -> None:
+        """Render heatmap ke ph_hmap.
+
+        Hanya rebuild Figure jika:
+        - force=True (misal: setelah simulasi selesai), atau
+        - sudah lewat HEATMAP_REFRESH_INTERVAL sejak render terakhir.
+
+        ExposureField.get_blurred() sendiri sudah lazy (hanya blur ulang
+        jika dirty), jadi aman dipanggil lebih sering.
+        """
+        last_render = st.session_state.heatmap_cache_time
+        elapsed = model.time_s - last_render
+        if not force and elapsed < HEATMAP_REFRESH_INTERVAL:
+            return
+
+        # Sync ExposureField dari obstacle_heatmap dict jika model tidak
+        # punya atribut exposure_field sendiri (backward-compat).
+        source_ef = getattr(model, "exposure_field", None)
+        if source_ef is not None:
+            # Model sudah pakai ExposureField incremental — langsung pakai
+            fig = plot_obstacle_heatmap(
+                model.obstacle_heatmap,
+                layout,
+                width,
+                height,
+                exposure_field=source_ef,
+            )
+        else:
+            # Fallback: rebuild dari dict (lebih lambat, tapi tetap pakai
+            # matplotlib + gaussian_filter — jauh lebih cepat dari versi lama)
+            fig = plot_obstacle_heatmap(
+                model.obstacle_heatmap,
+                layout,
+                width,
+                height,
+                exposure_field=ef,
+            )
+
+        ph_hmap.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        st.session_state.heatmap_cache_time = model.time_s
+
+    # ------------------------------------------------------------------ #
+    # Render statis (pause / stop)                                         #
+    # ------------------------------------------------------------------ #
+
+    def render_static() -> int:
         snap = model.get_grid_snapshot()
         n_now = model.count_humans()
         n_sit = model.count_sitting()
         n_pass = model.count_passing()
         n_tot = model.total_customers
         step_value = int(model.time_s)
+
         st.session_state.step_count = step_value
         ph_step.metric("Step", step_value)
         ph_active.metric("Active", n_now)
         ph_sit.metric("Sitting", n_sit)
         ph_pass.metric("Passing", n_pass)
         ph_total.metric("Total Arrived", n_tot)
+
         fig_room = plot_sim_room(snap, width, height, CELL_SIZE_PX)
         ph_room.pyplot(fig_room)
-        # fig_hmap = plot_obstacle_heatmap(
-        #     model.obstacle_heatmap, layout, width, height
-        # )
-        # ph_hmap.plotly_chart(fig_hmap, use_container_width=True, key=f"heatmap_step_{st.session_state.step_count}")
         plt.close(fig_room)
         return n_now
 
+    # ================================================================== #
+    # Branch: running                                                      #
+    # ================================================================== #
+
     if st.session_state.running:
         speed_x = cfg["speed_x"]
-        base_dt = SIM_DT_S
-        sim_dt = base_dt * speed_x
+        sim_dt = SIM_DT_S * speed_x
 
         renderer = SimRenderer(width, height, CELL_SIZE_PX)
         try:
@@ -218,6 +267,10 @@ def panel_simulate(cfg: dict) -> None:
                     break
 
                 model.step(sim_dt)
+
+                # Sync ExposureField jika model tidak punya sendiri
+                if not hasattr(model, "exposure_field"):
+                    _sync_exposure_field(ef, model.obstacle_heatmap)
 
                 sim_time_s = model.time_s
                 step_value = int(sim_time_s)
@@ -238,40 +291,41 @@ def panel_simulate(cfg: dict) -> None:
                 png_bytes = renderer.render(snap)
                 ph_room.image(png_bytes, use_container_width=True)
 
-                # Update heatmap HANYA setiap 10 step (bukan setiap frame)
-                if should_update_heatmap():
-                    render_heatmap()
-
                 ph_info.caption(
                     f"Time {sim_time_s:.1f}/{max_steps:.1f} s "
                     f"· Speed {speed_x}x "
                     f"· Active: {n_now}"
                 )
 
-                if not st.session_state.running:
-                    break
+                # Heatmap di-render tiap HEATMAP_REFRESH_INTERVAL
+                render_heatmap(force=False)
 
                 progress_bar.progress(min(sim_time_s / max_steps, 1.0))
+
+                if not st.session_state.running:
+                    break
 
         finally:
             renderer.close()
 
         st.session_state.running = False
         progress_bar.progress(1.0)
-        # Render final heatmap saat selesai
-        render_heatmap()
+        render_heatmap(force=True)
         ph_info.success(
             f"Simulation finished at {int(model.time_s)} s. "
             f"Total arrivals: {model.total_customers}."
         )
+
+    # ================================================================== #
+    # Branch: paused / stopped                                            #
+    # ================================================================== #
+
     else:
-        # Check jika model belum di-initialize sebelum render
         if st.session_state.model is not None:
             render_static()
-            
-            # Tampilkan final heatmap saat stop atau selesai
-            if model.time_s > 0 and should_update_heatmap():
-                render_heatmap()
+
+            if model.time_s > 0:
+                render_heatmap(force=True)
 
             if st.session_state.get("show_final_heatmap", False) or model.time_s >= max_steps:
                 ph_info.success(
@@ -285,12 +339,19 @@ def panel_simulate(cfg: dict) -> None:
             else:
                 ph_info.caption("Press **Start** to begin the simulation.")
         else:
-            ph_info.warning("⚠️ Model belum di-initialize. Tekan **Start** untuk memulai simulasi.")
-            
+            ph_info.warning(
+                "⚠️ Model belum di-initialize. Tekan **Start** untuk memulai simulasi."
+            )
+
+
+# ---------------------------------------------------------------------------
+# Controls
+# ---------------------------------------------------------------------------
+
 def _handle_controls(cfg, width, height, layout):
     chair_dirs = get_chair_directions()
     door_probs = st.session_state.get("door_probs", {})
-    
+
     def _new_model():
         return WaitingRoomModel(
             width=width,
@@ -304,13 +365,16 @@ def _handle_controls(cfg, width, height, layout):
             seed=cfg["seed"],
         )
 
+    def _reset_heatmap_state():
+        st.session_state.heatmap_cache_time = -1.0
+        st.session_state.exposure_field = ExposureField(width, height)
+
     if cfg["start"]:
         st.session_state.model = _new_model()
         st.session_state.step_count = 0
         st.session_state.running = True
         st.session_state.show_final_heatmap = False
-        st.session_state.fig_hmap_cache = None
-        st.session_state.last_heatmap_interval = -1  # Reset interval tracker
+        _reset_heatmap_state()
     elif cfg["stop"]:
         st.session_state.running = False
         st.session_state.show_final_heatmap = True
@@ -320,17 +384,38 @@ def _handle_controls(cfg, width, height, layout):
         st.session_state.step_count = 0
         st.session_state.running = False
         st.session_state.show_final_heatmap = False
-        st.session_state.fig_hmap_cache = None
-        st.session_state.last_heatmap_interval = -1  # Reset interval tracker
-    
-    # Initialize model hanya jika belum ada
+        _reset_heatmap_state()
+
     if st.session_state.model is None:
         st.session_state.model = _new_model()
         st.session_state.step_count = 0
         st.session_state.running = False
         st.session_state.show_final_heatmap = False
-        st.session_state.fig_hmap_cache = None
-        st.session_state.last_heatmap_interval = -1  # Initialize interval tracker
+        _reset_heatmap_state()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _sync_exposure_field(
+    ef: ExposureField,
+    obstacle_heatmap: dict,
+) -> None:
+    """Update ExposureField dari seluruh obstacle_heatmap dict.
+
+    Ini adalah fallback O(obstacles) yang dipanggil tiap step jika model
+    tidak punya ExposureField internal sendiri.
+
+    Catatan: metode ini me-reset dan rebuild ulang field dari dict — artinya
+    masih O(obstacles * sides) per step. Untuk performa optimal, integrasikan
+    ExposureField.record() langsung ke WaitingRoomModel.step().
+    """
+    ef.reset()
+    for (col, row), sides in obstacle_heatmap.items():
+        for side, weight in sides.items():
+            if weight > 0:
+                ef.record(col, row, side, weight)
 
 
 def _create_metric_placeholders():

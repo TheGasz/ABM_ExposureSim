@@ -2,214 +2,216 @@
 viz/obstacle_heatmap.py
 =======================
 Visualisasi heatmap exposure per sisi obstacle.
-Smoothing Viridis dengan midpoint interpolation.
+
+Opsi 2 + 3:
+- Incremental exposure field: field numpy diakumulasi langsung dari model,
+  bukan di-recompute tiap frame dari obstacle_heatmap dict.
+- Render via matplotlib imshow (jauh lebih ringan dari Plotly go.Heatmap).
+- Gaussian blur via scipy.ndimage.gaussian_filter (O(n) vs O(n * points)).
 """
 
-import numpy as np # type: ignore
-import plotly.graph_objects as go # type: ignore
-from typing import Dict, Tuple, Optional, List
+import numpy as np  # type: ignore
+import matplotlib  # type: ignore
+import matplotlib.pyplot as plt  # type: ignore
+import matplotlib.colors as mcolors  # type: ignore
+from scipy.ndimage import gaussian_filter  # type: ignore
+from typing import Dict, Tuple, Optional
+
 from constants import CELL_OBSTACLE
 
-BASE_LINE = "#2a2a4a"
-GRID_SCALE = 12
-SIGMA = 0.35
-MIDPOINT_DISTANCE = 1.0
+matplotlib.use("Agg")
+
+# ---------------------------------------------------------------------------
+# Konstanta rendering
+# ---------------------------------------------------------------------------
+GRID_SCALE = 4          # resolusi field: 4× ukuran grid (turun dari 12)
+BLUR_SIGMA = 1.8        # sigma gaussian_filter dalam pixel field
+BG_COLOR = "#0d0d1a"
+OBSTACLE_EDGE = "#4a4a7a"
+COLORMAP = "viridis"
 
 
-def _add_midpoints(points: List[Tuple[float, float, float]]) -> List[Tuple[float, float, float]]:
-    points_map = {(x, y): w for x, y, w in points}
-    midpoints: Dict[Tuple[float, float], float] = {}
-    for (x, y), w in points_map.items():
-        for dx, dy in ((MIDPOINT_DISTANCE, 0.0), (0.0, MIDPOINT_DISTANCE)):
-            neighbor = (x + dx, y + dy)
-            if neighbor in points_map:
-                mid = (x + dx * 0.5, y + dy * 0.5)
-                mid_w = (w + points_map[neighbor]) * 0.5
-                existing = midpoints.get(mid)
-                midpoints[mid] = mid_w if existing is None else max(existing, mid_w)
-    combined = [(x, y, w) for (x, y), w in points_map.items()]
-    combined.extend((x, y, w) for (x, y), w in midpoints.items())
-    return combined
+# ---------------------------------------------------------------------------
+# ExposureField — state yang hidup di dalam model (atau di session_state)
+# ---------------------------------------------------------------------------
 
+class ExposureField:
+    """Array numpy yang terakumulasi tiap kali agen menyentuh sisi obstacle.
+
+    Cara pakai (di WaitingRoomModel):
+
+        # Inisialisasi (sekali, saat model dibuat)
+        self.exposure_field = ExposureField(width, height)
+
+        # Tiap agen lewat sisi obstacle:
+        self.exposure_field.record(col, row, side, weight=1.0)
+
+        # obstacle_heatmap dict tetap diupdate seperti biasa untuk hover info.
+
+    Di viz layer, lewatkan `model.exposure_field` ke `plot_obstacle_heatmap`.
+    Jika model tidak punya atribut tersebut (backward-compat), fungsi akan
+    fall back ke rebuild dari obstacle_heatmap dict.
+    """
+
+    def __init__(self, width: int, height: int) -> None:
+        self.width = width
+        self.height = height
+        ny = max(2, height * GRID_SCALE)
+        nx = max(2, width * GRID_SCALE)
+        self._field = np.zeros((ny, nx), dtype=np.float32)
+        self._dirty = True  # perlu re-blur?
+        self._blurred: Optional[np.ndarray] = None
+
+    # ------------------------------------------------------------------ #
+    # Side → pixel koordinat di dalam field array                         #
+    # ------------------------------------------------------------------ #
+    def _side_pixel(self, col: int, row: int, side: str) -> Tuple[int, int]:
+        """Kembalikan (iy, ix) dalam koordinat field array."""
+        s = GRID_SCALE
+        xc = int((col + 0.5) * s)
+        yc = int((row + 0.5) * s)
+        x0 = int(col * s)
+        y0 = int(row * s)
+        x1 = int((col + 1) * s)
+        y1 = int((row + 1) * s)
+        mapping = {
+            "top":    (y0,  xc),
+            "bottom": (y1,  xc),
+            "left":   (yc,  x0),
+            "right":  (yc,  x1),
+        }
+        iy, ix = mapping.get(side, (yc, xc))
+        ny, nx = self._field.shape
+        return (min(iy, ny - 1), min(ix, nx - 1))
+
+    def record(self, col: int, row: int, side: str, weight: float = 1.0) -> None:
+        """Tambahkan exposure pada satu sisi obstacle. O(1)."""
+        iy, ix = self._side_pixel(col, row, side)
+        self._field[iy, ix] += weight
+        self._dirty = True
+
+    def get_blurred(self) -> np.ndarray:
+        """Return normalized blurred field. Blur hanya dihitung ulang jika dirty."""
+        if self._dirty or self._blurred is None:
+            blurred = gaussian_filter(self._field, sigma=BLUR_SIGMA)
+            max_val = blurred.max()
+            self._blurred = blurred / max_val if max_val > 0 else blurred
+            self._dirty = False
+        return self._blurred
+
+    def reset(self) -> None:
+        self._field[:] = 0.0
+        self._blurred = None
+        self._dirty = True
+
+    # ------------------------------------------------------------------ #
+    # Rebuild dari obstacle_heatmap dict (fallback / backward-compat)     #
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def from_heatmap_dict(
+        cls,
+        obstacle_heatmap: Dict[Tuple[int, int], Dict[str, float]],
+        width: int,
+        height: int,
+    ) -> "ExposureField":
+        """Bangun ExposureField dari obstacle_heatmap dict yang sudah ada.
+
+        Dipakai sebagai fallback jika model lama belum punya ExposureField.
+        Lebih lambat dari incremental, tapi jauh lebih cepat dari full meshgrid.
+        """
+        ef = cls(width, height)
+        for (col, row), sides in obstacle_heatmap.items():
+            for side, weight in sides.items():
+                if weight > 0:
+                    ef.record(col, row, side, weight)
+        return ef
+
+
+# ---------------------------------------------------------------------------
+# Fungsi render utama — matplotlib, bukan Plotly
+# ---------------------------------------------------------------------------
 
 def plot_obstacle_heatmap(
     obstacle_heatmap: Dict[Tuple[int, int], Dict[str, float]],
     layout: Dict[Tuple[int, int], int],
     width: int,
     height: int,
-    prev_fig: Optional[go.Figure] = None,
-) -> go.Figure:
-    """Plot heatmap per sisi obstacle (empat sisi).
-    
+    exposure_field: Optional[ExposureField] = None,
+) -> plt.Figure:
+    """Render obstacle exposure heatmap sebagai matplotlib Figure.
+
     Parameters
     ----------
     obstacle_heatmap : Dict
-        {(col, row): {"top": weight, "right": weight, "bottom": weight, "left": weight}}
+        {(col, row): {"top": w, "right": w, "bottom": w, "left": w}}
+        Dipakai untuk annotasi tooltip/text jika perlu, dan sebagai
+        fallback jika exposure_field tidak diberikan.
     layout : Dict
-        Grid layout
+        Grid layout — untuk menggambar overlay obstacle.
     width, height : int
-        Grid dimensions
-    prev_fig : Optional[go.Figure]
-        Parameter legacy (diabaikan), disisakan untuk kompatibilitas.
-    
+        Dimensi grid.
+    exposure_field : ExposureField, optional
+        Jika diberikan, field sudah terakumulasi secara incremental (cepat).
+        Jika None, di-rebuild dari obstacle_heatmap dict (fallback).
+
     Returns
     -------
-    go.Figure
-        Plotly heatmap visualization
+    matplotlib.figure.Figure
     """
+    # --- Ambil / build blurred field ---
+    if exposure_field is not None:
+        field = exposure_field.get_blurred()
+    elif obstacle_heatmap:
+        ef = ExposureField.from_heatmap_dict(obstacle_heatmap, width, height)
+        field = ef.get_blurred()
+    else:
+        field = np.zeros((max(2, height * GRID_SCALE), max(2, width * GRID_SCALE)), dtype=np.float32)
 
+    # --- Figure setup ---
+    fig, ax = plt.subplots(figsize=(4.2, 4.2), facecolor=BG_COLOR)
+    ax.set_facecolor(BG_COLOR)
+
+    # --- Heatmap ---
+    im = ax.imshow(
+        field,
+        origin="upper",
+        cmap=COLORMAP,
+        vmin=0.0,
+        vmax=1.0,
+        extent=[0, width, height, 0],
+        interpolation="bilinear",   # ringan, smooth cukup
+        aspect="equal",
+    )
+
+    # --- Colorbar ---
+    cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
+    cbar.set_label("Exposure", color="white", fontsize=8)
+    cbar.ax.yaxis.set_tick_params(color="white", labelcolor="white", labelsize=7)
+
+    # --- Overlay obstacle rectangles ---
     obstacle_cells = [
         (col, row)
         for (col, row), cell_type in layout.items()
         if cell_type == CELL_OBSTACLE and 0 <= row < height and 0 <= col < width
     ]
-
-    side_points: Dict[str, List[Tuple[float, float, float]]] = {
-        "top": [],
-        "right": [],
-        "bottom": [],
-        "left": [],
-    }
-
-    hover_x = []
-    hover_y = []
-    hover_text = []
-    shapes = []
-
     for (col, row) in obstacle_cells:
-        x0 = float(col)
-        y0 = float(row)
-        xc = x0 + 0.5
-        yc = y0 + 0.5
-
-        weights = obstacle_heatmap.get((col, row), {})
-        top_w = float(weights.get("top", 0.0))
-        right_w = float(weights.get("right", 0.0))
-        bottom_w = float(weights.get("bottom", 0.0))
-        left_w = float(weights.get("left", 0.0))
-
-        if top_w > 0:
-            side_points["top"].append((xc, y0, top_w))
-        if right_w > 0:
-            side_points["right"].append((x0 + 1.0, yc, right_w))
-        if bottom_w > 0:
-            side_points["bottom"].append((xc, y0 + 1.0, bottom_w))
-        if left_w > 0:
-            side_points["left"].append((x0, yc, left_w))
-
-        total = top_w + right_w + bottom_w + left_w
-        sides_str = " | ".join(
-            part
-            for part in [
-                f"top: {top_w:.1f}" if top_w > 0 else "",
-                f"right: {right_w:.1f}" if right_w > 0 else "",
-                f"bottom: {bottom_w:.1f}" if bottom_w > 0 else "",
-                f"left: {left_w:.1f}" if left_w > 0 else "",
-            ]
-            if part
-        ) or "no exposure"
-
-        hover_x.append(xc)
-        hover_y.append(yc)
-        hover_text.append(
-            f"<b>Obstacle ({col}, {row})</b><br>"
-            f"Total: {total:.1f}<br>"
-            f"{sides_str}"
+        rect = plt.Rectangle(
+            (col, row), 1, 1,
+            linewidth=0.7,
+            edgecolor=OBSTACLE_EDGE,
+            facecolor="none",
         )
+        ax.add_patch(rect)
 
-        shapes.append(
-            dict(
-                type="rect",
-                xref="x",
-                yref="y",
-                x0=x0,
-                x1=x0 + 1.0,
-                y0=y0,
-                y1=y0 + 1.0,
-                line=dict(color=BASE_LINE, width=1),
-                fillcolor="rgba(0,0,0,0)",
-            )
-        )
+    # --- Axes styling ---
+    ax.set_xlim(0, width)
+    ax.set_ylim(height, 0)   # y terbalik: row 0 di atas
+    ax.tick_params(colors="#555555", labelsize=7)
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#333355")
 
-    all_points: List[Tuple[float, float, float]] = []
-    for points in side_points.values():
-        if points:
-            all_points.extend(_add_midpoints(points))
+    ax.set_title("🔥 Obstacle Exposure Heatmap", color="white", fontsize=9,
+                 fontfamily="monospace", loc="left", pad=6)
 
-    nx = max(2, int(width * GRID_SCALE))
-    ny = max(2, int(height * GRID_SCALE))
-    x = np.linspace(0.0, float(width), nx)
-    y = np.linspace(0.0, float(height), ny)
-    X, Y = np.meshgrid(x, y)
-
-    field = np.zeros((ny, nx), dtype=float)
-    for px, py, weight in all_points:
-        d2 = (X - px) ** 2 + (Y - py) ** 2
-        field += weight * np.exp(-d2 / (2.0 * SIGMA ** 2))
-
-    max_val = float(np.max(field)) if field.size else 0.0
-    if max_val > 0:
-        field = field / max_val
-
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=field,
-            x=x,
-            y=y,
-            colorscale="Viridis",
-            zmin=0,
-            zmax=1,
-            colorbar=dict(
-                title=dict(text="Exposure", font=dict(color="white", size=11)),
-                tickfont=dict(color="white"),
-                len=0.75,
-                thickness=14,
-            ),
-            hovertemplate="Exposure: %{z:.2f}<extra></extra>",
-            showscale=True,
-            zsmooth="best",
-        )
-    )
-
-    fig.update_layout(
-        title=dict(
-            text="🔥 Obstacle Exposure Heatmap",
-            font=dict(color="white", size=13, family="monospace"),
-            x=0.02,
-        ),
-        paper_bgcolor="#0d0d1a",
-        plot_bgcolor="#0d0d1a",
-        xaxis=dict(
-            showgrid=False,
-            zeroline=False,
-            tickfont=dict(color="#666"),
-            range=[0, width],
-            constrain="domain",
-        ),
-        yaxis=dict(
-            showgrid=False,
-            zeroline=False,
-            tickfont=dict(color="#666"),
-            range=[0, height],
-            autorange="reversed",
-            scaleanchor="x",
-        ),
-        margin=dict(l=40, r=20, t=50, b=40),
-        height=400,
-        shapes=shapes,
-    )
-
-    if hover_x:
-        fig.add_trace(
-            go.Scatter(
-                x=hover_x,
-                y=hover_y,
-                mode="markers",
-                marker=dict(size=6, color="rgba(0,0,0,0)"),
-                text=hover_text,
-                hovertemplate="%{text}<extra></extra>",
-                showlegend=False,
-            )
-        )
-
+    fig.tight_layout(pad=0.4)
     return fig
