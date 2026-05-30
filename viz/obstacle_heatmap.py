@@ -17,6 +17,7 @@ import numpy as np  # type: ignore
 import matplotlib  # type: ignore
 import matplotlib.pyplot as plt  # type: ignore
 import matplotlib.colors as mcolors  # type: ignore
+import plotly.graph_objects as go  # type: ignore
 from scipy.ndimage import gaussian_filter  # type: ignore
 
 from constants import CELL_OBSTACLE
@@ -31,6 +32,7 @@ BLUR_SIGMA = 1.8        # sigma gaussian_filter dalam pixel field
 BG_COLOR = "#0d0d1a"
 OBSTACLE_EDGE = "#4a4a7a"
 COLORMAP = "viridis"
+PLOTLY_COLORSCALE = "Viridis"
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +164,130 @@ def build_obstacle_heatmap_field(
     return _empty_field(width, height)
 
 
+def _format_obstacle_hover(
+    col: int,
+    row: int,
+    sides: Dict[str, float],
+) -> str:
+    top = sides.get("top", 0.0)
+    right = sides.get("right", 0.0)
+    bottom = sides.get("bottom", 0.0)
+    left = sides.get("left", 0.0)
+    return (
+        f"Obstacle ({col}, {row})<br>"
+        f"Top: {top:.2f}<br>"
+        f"Right: {right:.2f}<br>"
+        f"Bottom: {bottom:.2f}<br>"
+        f"Left: {left:.2f}"
+    )
+
+
+def build_obstacle_heatmap_plotly(
+    obstacle_heatmap: Dict[Tuple[int, int], Dict[str, float]],
+    layout: Dict[Tuple[int, int], int],
+    width: int,
+    height: int,
+    exposure_field: Optional[ExposureField] = None,
+) -> "go.Figure":
+    field = build_obstacle_heatmap_field(obstacle_heatmap, width, height, exposure_field)
+    ny, nx = field.shape
+    xs = np.linspace(0, width, nx)
+    ys = np.linspace(0, height, ny)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Heatmap(
+            z=field,
+            x=xs,
+            y=ys,
+            colorscale=PLOTLY_COLORSCALE,
+            zmin=0.0,
+            zmax=1.0,
+            showscale=True,
+            colorbar=dict(title=dict(text="Exposure"), thickness=12),
+            zsmooth="best",
+            hoverinfo="skip",
+        )
+    )
+
+    shapes = []
+    hover_x = []
+    hover_y = []
+    hover_text = []
+
+    for (col, row), cell_type in layout.items():
+        if cell_type != CELL_OBSTACLE or not (0 <= row < height and 0 <= col < width):
+            continue
+        shapes.append(
+            dict(
+                type="rect",
+                x0=col,
+                x1=col + 1,
+                y0=row,
+                y1=row + 1,
+                line=dict(color=OBSTACLE_EDGE, width=1),
+                fillcolor="rgba(0,0,0,0)",
+            )
+        )
+        hover_x.append(col + 0.5)
+        hover_y.append(row + 0.5)
+        hover_text.append(_format_obstacle_hover(col, row, obstacle_heatmap.get((col, row), {})))
+
+    if hover_x:
+        fig.add_trace(
+            go.Scatter(
+                x=hover_x,
+                y=hover_y,
+                mode="markers",
+                marker=dict(size=24, color="rgba(255,255,255,0.01)", symbol="square"),
+                hovertext=hover_text,
+                hovertemplate="%{hovertext}<extra></extra>",
+                showlegend=False,
+            )
+        )
+
+    fig.update_layout(
+        shapes=shapes,
+        paper_bgcolor=BG_COLOR,
+        plot_bgcolor=BG_COLOR,
+        margin=dict(l=10, r=10, t=40, b=10),
+        title=dict(
+            text="🔥 Obstacle Exposure Heatmap",
+            font=dict(color="white", size=12, family="monospace"),
+            x=0.02,
+        ),
+        hovermode="closest",
+    )
+    fig.update_xaxes(range=[0, width], showgrid=False, zeroline=False, visible=False)
+    fig.update_yaxes(range=[height, 0], showgrid=False, zeroline=False, visible=False)
+    return fig
+
+
+def _add_obstacle_detail_text(
+    ax: plt.Axes,
+    obstacle_heatmap: Dict[Tuple[int, int], Dict[str, float]],
+    width: int,
+    height: int,
+) -> None:
+    for (col, row), sides in obstacle_heatmap.items():
+        if not (0 <= col < width and 0 <= row < height):
+            continue
+        text = (
+            f"T:{sides.get('top', 0.0):.2f} R:{sides.get('right', 0.0):.2f}\n"
+            f"B:{sides.get('bottom', 0.0):.2f} L:{sides.get('left', 0.0):.2f}"
+        )
+        ax.text(
+            col + 0.5,
+            row + 0.5,
+            text,
+            ha="center",
+            va="center",
+            fontsize=5.5,
+            color="white",
+            family="monospace",
+        )
+
+
 class HeatmapRenderer:
     """Renderer matplotlib yang reuse figure agar update cepat."""
 
@@ -249,6 +375,66 @@ class HeatmapRenderWorker:
         if self._renderer is not None:
             self._renderer.close()
             self._renderer = None
+
+
+def render_heatmap_details_png(
+    obstacle_heatmap: Dict[Tuple[int, int], Dict[str, float]],
+    layout: Dict[Tuple[int, int], int],
+    width: int,
+    height: int,
+    exposure_field: Optional[ExposureField] = None,
+) -> bytes:
+    field = build_obstacle_heatmap_field(obstacle_heatmap, width, height, exposure_field)
+
+    fig, ax = plt.subplots(figsize=(4.2, 4.2), facecolor=BG_COLOR)
+    ax.set_facecolor(BG_COLOR)
+
+    im = ax.imshow(
+        field,
+        origin="upper",
+        cmap=COLORMAP,
+        vmin=0.0,
+        vmax=1.0,
+        extent=[0, width, height, 0],
+        interpolation="bilinear",
+        aspect="equal",
+    )
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
+    cbar.set_label("Exposure", color="white", fontsize=8)
+    cbar.ax.yaxis.set_tick_params(color="white", labelcolor="white", labelsize=7)
+
+    obstacle_cells = [
+        (col, row)
+        for (col, row), cell_type in layout.items()
+        if cell_type == CELL_OBSTACLE and 0 <= row < height and 0 <= col < width
+    ]
+    for (col, row) in obstacle_cells:
+        rect = plt.Rectangle(
+            (col, row), 1, 1,
+            linewidth=0.7,
+            edgecolor=OBSTACLE_EDGE,
+            facecolor="none",
+        )
+        ax.add_patch(rect)
+
+    _add_obstacle_detail_text(ax, obstacle_heatmap, width, height)
+
+    ax.set_xlim(0, width)
+    ax.set_ylim(height, 0)
+    ax.tick_params(colors="#555555", labelsize=7)
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#333355")
+
+    ax.set_title("🔥 Obstacle Exposure Heatmap", color="white", fontsize=9,
+                 fontfamily="monospace", loc="left", pad=6)
+
+    fig.tight_layout(pad=0.4)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------

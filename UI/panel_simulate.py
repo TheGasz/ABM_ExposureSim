@@ -4,7 +4,8 @@ ui/panel_simulate.py
 Simulation panel for running the ABM and visualizing movement.
 
 Perubahan vs versi lama:
-- Heatmap render via matplotlib (PNG) dan di-cache di session_state.
+- Heatmap live render via matplotlib (PNG) dan di-cache di session_state.
+- Heatmap final memakai Plotly interaktif dengan hover detail per obstacle.
 - ExposureField dipakai sebagai incremental accumulator; diinit ulang tiap
     Start/Reset agar field tidak rebuild tiap step.
 - render_heatmap() offload ke thread worker dan update via placeholder image.
@@ -14,7 +15,7 @@ Perubahan vs versi lama:
 from concurrent.futures import ThreadPoolExecutor
 
 from viz.sim_plots import plot_sim_room, SimRenderer
-from viz.obstacle_heatmap import ExposureField, HeatmapRenderWorker
+from viz.obstacle_heatmap import ExposureField, HeatmapRenderWorker, build_obstacle_heatmap_plotly
 import matplotlib.pyplot as plt  # type: ignore
 import streamlit as st  # type: ignore
 
@@ -180,6 +181,10 @@ def panel_simulate(cfg: dict) -> None:
         st.session_state.heatmap_last_version = -1
     if "heatmap_png_cache" not in st.session_state:
         st.session_state.heatmap_png_cache = None
+    if "heatmap_plotly_cache" not in st.session_state:
+        st.session_state.heatmap_plotly_cache = None
+    if "heatmap_plotly_version" not in st.session_state:
+        st.session_state.heatmap_plotly_version = -1
 
     # ExposureField hidup di session_state agar persist antar rerun
     if "exposure_field" not in st.session_state or st.session_state.exposure_field is None:
@@ -191,7 +196,7 @@ def panel_simulate(cfg: dict) -> None:
     # Helper render heatmap                                                #
     # ------------------------------------------------------------------ #
 
-    def render_heatmap(force: bool = False) -> None:
+    def render_heatmap(force: bool = False, show_details: bool = False) -> None:
         """Render heatmap ke ph_hmap.
 
         Hanya rebuild Figure jika:
@@ -200,6 +205,34 @@ def panel_simulate(cfg: dict) -> None:
 
         Rendering di-offload ke worker dan hasil PNG di-cache.
         """
+        if show_details:
+            _discard_heatmap_future()
+            source_ef = getattr(model, "exposure_field", None)
+            if source_ef is None:
+                _sync_exposure_field(ef, model.obstacle_heatmap)
+                source_ef = ef
+
+            current_version = source_ef.get_version()
+            if (
+                st.session_state.heatmap_plotly_cache is None
+                or st.session_state.heatmap_plotly_version != current_version
+            ):
+                st.session_state.heatmap_plotly_cache = build_obstacle_heatmap_plotly(
+                    model.obstacle_heatmap,
+                    layout,
+                    width,
+                    height,
+                    exposure_field=source_ef,
+                )
+                st.session_state.heatmap_plotly_version = current_version
+
+            st.session_state.heatmap_png_cache = None
+            ph_hmap.empty()
+            ph_hmap.plotly_chart(st.session_state.heatmap_plotly_cache, use_container_width=True)
+            st.session_state.heatmap_cache_time = model.time_s
+            st.session_state.heatmap_last_version = current_version
+            return
+
         _collect_heatmap_future()
 
         if st.session_state.heatmap_png_cache is not None:
@@ -324,7 +357,7 @@ def panel_simulate(cfg: dict) -> None:
 
         st.session_state.running = False
         progress_bar.progress(1.0)
-        render_heatmap(force=True)
+        render_heatmap(force=True, show_details=model.time_s >= max_steps)
         ph_info.success(
             f"Simulation finished at {int(model.time_s)} s. "
             f"Total arrivals: {model.total_customers}."
@@ -339,7 +372,7 @@ def panel_simulate(cfg: dict) -> None:
             render_static()
 
             if model.time_s > 0:
-                render_heatmap(force=True)
+                render_heatmap(force=True, show_details=model.time_s >= max_steps)
 
             if st.session_state.get("show_final_heatmap", False) or model.time_s >= max_steps:
                 ph_info.success(
@@ -384,6 +417,8 @@ def _handle_controls(cfg, width, height, layout):
         st.session_state.exposure_field = ExposureField(width, height)
         st.session_state.heatmap_last_version = -1
         st.session_state.heatmap_png_cache = None
+        st.session_state.heatmap_plotly_cache = None
+        st.session_state.heatmap_plotly_version = -1
         _shutdown_heatmap_render_state()
 
     if cfg["start"]:
@@ -473,6 +508,8 @@ def _shutdown_heatmap_render_state() -> None:
 
     st.session_state.heatmap_layout_signature = None
     st.session_state.heatmap_png_cache = None
+    st.session_state.heatmap_plotly_cache = None
+    st.session_state.heatmap_plotly_version = -1
     st.session_state.heatmap_last_version = -1
 
 
@@ -485,6 +522,15 @@ def _collect_heatmap_future() -> None:
         st.session_state.heatmap_png_cache = future.result()
     finally:
         st.session_state.heatmap_future = None
+
+
+def _discard_heatmap_future() -> None:
+    future = st.session_state.get("heatmap_future")
+    if future is None:
+        return
+    if not future.done():
+        future.cancel()
+    st.session_state.heatmap_future = None
 
 
 def _create_metric_placeholders():
