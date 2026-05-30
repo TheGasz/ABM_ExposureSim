@@ -142,7 +142,7 @@ def panel_simulate(cfg: dict) -> None:
     col_room, col_heat = st.columns([1.2, 1], gap="medium")
     
     with col_room:
-        st.markdown("#### 🗺️ Room State")
+        st.markdown("####  Room State")
         ph_room = st.empty()
     
     with col_heat:
@@ -157,23 +157,31 @@ def panel_simulate(cfg: dict) -> None:
     # Initialize heatmap cache
     if "fig_hmap_cache" not in st.session_state:
         st.session_state.fig_hmap_cache = None
-    if "heatmap_cache_time" not in st.session_state:
-        st.session_state.heatmap_cache_time = None
+    if "last_heatmap_interval" not in st.session_state:
+        st.session_state.last_heatmap_interval = -1
+
+    HEATMAP_UPDATE_INTERVAL = 10  # Update heatmap setiap 10 steps
 
     def render_heatmap() -> None:
-        cache_time = st.session_state.get("heatmap_cache_time")
-        if st.session_state.fig_hmap_cache is None or cache_time != model.time_s:
-            st.session_state.fig_hmap_cache = plot_obstacle_heatmap(
-                model.obstacle_heatmap,
-                layout,
-                width,
-                height,
-            )
-            st.session_state.heatmap_cache_time = model.time_s
+        """Update dan render heatmap"""
+        st.session_state.fig_hmap_cache = plot_obstacle_heatmap(
+            model.obstacle_heatmap,
+            layout,
+            width,
+            height,
+        )
         ph_hmap.plotly_chart(
             st.session_state.fig_hmap_cache,
             use_container_width=True,
         )
+
+    def should_update_heatmap() -> bool:
+        """Check jika sudah saatnya update heatmap (setiap 10 step berdasarkan model time)"""
+        current_interval = int(model.time_s / HEATMAP_UPDATE_INTERVAL)
+        if current_interval > st.session_state.last_heatmap_interval:
+            st.session_state.last_heatmap_interval = current_interval
+            return True
+        return False
 
     def render_static():
         """Render sekali pakai untuk kondisi pause — pakai plot_sim_room biasa."""
@@ -230,6 +238,10 @@ def panel_simulate(cfg: dict) -> None:
                 png_bytes = renderer.render(snap)
                 ph_room.image(png_bytes, use_container_width=True)
 
+                # Update heatmap HANYA setiap 10 step (bukan setiap frame)
+                if should_update_heatmap():
+                    render_heatmap()
+
                 ph_info.caption(
                     f"Time {sim_time_s:.1f}/{max_steps:.1f} s "
                     f"· Speed {speed_x}x "
@@ -246,8 +258,8 @@ def panel_simulate(cfg: dict) -> None:
 
         st.session_state.running = False
         progress_bar.progress(1.0)
-        if model.time_s >= max_steps:
-            render_heatmap()
+        # Render final heatmap saat selesai
+        render_heatmap()
         ph_info.success(
             f"Simulation finished at {int(model.time_s)} s. "
             f"Total arrivals: {model.total_customers}."
@@ -258,7 +270,7 @@ def panel_simulate(cfg: dict) -> None:
             render_static()
             
             # Tampilkan final heatmap saat stop atau selesai
-            if model.time_s > 0:
+            if model.time_s > 0 and should_update_heatmap():
                 render_heatmap()
 
             if st.session_state.get("show_final_heatmap", False) or model.time_s >= max_steps:
@@ -298,7 +310,7 @@ def _handle_controls(cfg, width, height, layout):
         st.session_state.running = True
         st.session_state.show_final_heatmap = False
         st.session_state.fig_hmap_cache = None
-        st.session_state.heatmap_cache_time = None
+        st.session_state.last_heatmap_interval = -1  # Reset interval tracker
     elif cfg["stop"]:
         st.session_state.running = False
         st.session_state.show_final_heatmap = True
@@ -309,7 +321,7 @@ def _handle_controls(cfg, width, height, layout):
         st.session_state.running = False
         st.session_state.show_final_heatmap = False
         st.session_state.fig_hmap_cache = None
-        st.session_state.heatmap_cache_time = None
+        st.session_state.last_heatmap_interval = -1  # Reset interval tracker
     
     # Initialize model hanya jika belum ada
     if st.session_state.model is None:
@@ -318,7 +330,7 @@ def _handle_controls(cfg, width, height, layout):
         st.session_state.running = False
         st.session_state.show_final_heatmap = False
         st.session_state.fig_hmap_cache = None
-        st.session_state.heatmap_cache_time = None
+        st.session_state.last_heatmap_interval = -1  # Initialize interval tracker
 
 
 def _create_metric_placeholders():
