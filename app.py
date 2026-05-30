@@ -8,7 +8,6 @@ Run with:
 """
 
 import streamlit as st
-from "@vercel/speed-insights/next" import SpeedInsights  # type: ignore
 
 from ui.state import init_session
 from ui.panel_design import build_sidebar_design, panel_design
