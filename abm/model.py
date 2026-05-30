@@ -626,17 +626,18 @@ class WaitingRoomModel:
                         vision_polygon
                     ):
                         visible_count += 1
+                if visible_count == 0:
+                    continue
                 
                 # Weight increase: 0.2 per agent per frame
                 weight_increase = visible_count * (self.frame_dt / HEATMAP_LOOK_DURATION_S)
                 self.obstacle_heatmap[obs_cell][side_name] += weight_increase
-                if weight_increase > 0:
-                    self.exposure_field.record(
-                        obs_cell[0],
-                        obs_cell[1],
-                        side_name,
-                        weight_increase,
-                    )
+                self.exposure_field.record(
+                    obs_cell[0],
+                    obs_cell[1],
+                    side_name,
+                    weight_increase,
+                )
 
     def _point_in_polygon(
         self, 
