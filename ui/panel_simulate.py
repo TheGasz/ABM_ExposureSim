@@ -13,6 +13,8 @@ Perubahan vs versi lama:
 """
 
 from concurrent.futures import ThreadPoolExecutor
+import math
+import time
 
 from viz.sim_plots import plot_sim_room, SimRenderer
 from viz.obstacle_heatmap import ExposureField, HeatmapRenderWorker, build_obstacle_heatmap_plotly
@@ -33,6 +35,18 @@ SIM_DT_S = DEFAULT_DT_S
 # Seberapa sering heatmap di-refresh saat simulasi berjalan (detik sim-time).
 # Naikkan nilai ini jika masih terasa berat; turunkan untuk update lebih sering.
 HEATMAP_REFRESH_INTERVAL = 5.0
+
+# Target update rate for the room visualization (wall-clock FPS).
+# Streamlit Cloud can freeze the frontend if we send too many large image deltas
+# in a single run; we therefore animate via short reruns and cap FPS.
+ROOM_TARGET_FPS = 8
+
+# How much simulated time to advance per UI frame (seconds).
+# Larger values reduce the number of reruns/frames (more cloud-friendly).
+ROOM_SIM_ADVANCE_PER_FRAME_S = 0.5
+
+# Upper bound on how many model.step() calls we do in a single rerun.
+ROOM_MAX_SUBSTEPS_PER_RERUN = 50
 
 
 # ---------------------------------------------------------------------------
@@ -309,61 +323,71 @@ def panel_simulate(cfg: dict) -> None:
         speed_x = cfg["speed_x"]
         sim_dt = SIM_DT_S * speed_x
 
-        renderer = SimRenderer(width, height, CELL_SIZE_PX)
-        try:
-            while model.time_s < max_steps:
-                if not st.session_state.running:
-                    break
+        # Create/reuse a renderer across reruns so the static layer is only drawn once.
+        layout_sig = st.session_state.get("heatmap_layout_signature")
+        renderer = _ensure_sim_render_state(width, height, layout_sig)
 
-                model.step(sim_dt)
+        tick_start = time.perf_counter()
 
-                # Sync ExposureField jika model tidak punya sendiri
-                if not hasattr(model, "exposure_field"):
-                    _sync_exposure_field(ef, model.obstacle_heatmap)
+        # Advance the model for a bounded amount of simulated time per rerun.
+        # This avoids a long blocking while-loop (which can prevent incremental UI updates in Streamlit Cloud).
+        target_substeps = int(math.ceil(ROOM_SIM_ADVANCE_PER_FRAME_S / max(sim_dt, 1e-9)))
+        n_substeps = max(1, min(ROOM_MAX_SUBSTEPS_PER_RERUN, target_substeps))
 
-                sim_time_s = model.time_s
-                step_value = int(sim_time_s)
-                st.session_state.step_count = step_value
+        for _ in range(n_substeps):
+            if not st.session_state.running or model.time_s >= max_steps:
+                break
+            model.step(sim_dt)
 
-                snap = model.get_grid_snapshot()
-                n_now = model.count_humans()
-                n_sit = model.count_sitting()
-                n_pass = model.count_passing()
-                n_tot = model.total_customers
+            # Sync ExposureField jika model tidak punya sendiri
+            if not hasattr(model, "exposure_field"):
+                _sync_exposure_field(ef, model.obstacle_heatmap)
 
-                ph_step.metric("Step", step_value)
-                ph_active.metric("Active", n_now)
-                ph_sit.metric("Sitting", n_sit)
-                ph_pass.metric("Passing", n_pass)
-                ph_total.metric("Total Arrived", n_tot)
+        sim_time_s = model.time_s
+        step_value = int(sim_time_s)
+        st.session_state.step_count = step_value
 
-                png_bytes = renderer.render(snap)
-                ph_room.image(png_bytes, use_container_width=True)
+        snap = model.get_grid_snapshot()
+        n_now = model.count_humans()
+        n_sit = model.count_sitting()
+        n_pass = model.count_passing()
+        n_tot = model.total_customers
 
-                ph_info.caption(
-                    f"Time {sim_time_s:.1f}/{max_steps:.1f} s "
-                    f"· Speed {speed_x}x "
-                    f"· Active: {n_now}"
-                )
+        ph_step.metric("Step", step_value)
+        ph_active.metric("Active", n_now)
+        ph_sit.metric("Sitting", n_sit)
+        ph_pass.metric("Passing", n_pass)
+        ph_total.metric("Total Arrived", n_tot)
 
-                # Heatmap di-render tiap HEATMAP_REFRESH_INTERVAL
-                render_heatmap(force=False)
+        png_bytes = renderer.render(snap)
+        ph_room.image(png_bytes, use_container_width=True)
 
-                progress_bar.progress(min(sim_time_s / max_steps, 1.0))
-
-                if not st.session_state.running:
-                    break
-
-        finally:
-            renderer.close()
-
-        st.session_state.running = False
-        progress_bar.progress(1.0)
-        render_heatmap(force=True, show_details=model.time_s >= max_steps)
-        ph_info.success(
-            f"Simulation finished at {int(model.time_s)} s. "
-            f"Total arrivals: {model.total_customers}."
+        ph_info.caption(
+            f"Time {sim_time_s:.1f}/{max_steps:.1f} s "
+            f"· Speed {speed_x}x "
+            f"· Active: {n_now}"
         )
+
+        # Heatmap di-render tiap HEATMAP_REFRESH_INTERVAL
+        render_heatmap(force=False)
+        progress_bar.progress(min(sim_time_s / max_steps, 1.0))
+
+        if model.time_s >= max_steps:
+            st.session_state.running = False
+            progress_bar.progress(1.0)
+            render_heatmap(force=True, show_details=True)
+            ph_info.success(
+                f"Simulation finished at {int(model.time_s)} s. "
+                f"Total arrivals: {model.total_customers}."
+            )
+            _shutdown_sim_render_state()
+        elif st.session_state.running:
+            # Cap wall-clock FPS to prevent flooding the frontend with large image deltas.
+            elapsed = time.perf_counter() - tick_start
+            min_frame = 1.0 / float(max(1, ROOM_TARGET_FPS))
+            if elapsed < min_frame:
+                time.sleep(min_frame - elapsed)
+            st.rerun()
 
     # ================================================================== #
     # Branch: paused / stopped                                            #
@@ -440,6 +464,7 @@ def _handle_controls(cfg, width, height, layout):
             st.session_state.show_final_heatmap = False
         else:
             # Fresh start — buat model baru
+            _shutdown_sim_render_state()
             st.session_state.model = _new_model()
             st.session_state.step_count = 0
             st.session_state.running = True
@@ -457,7 +482,9 @@ def _handle_controls(cfg, width, height, layout):
         st.session_state.running = False
         st.session_state.paused = False
         st.session_state.show_final_heatmap = True
+        _shutdown_sim_render_state()
     elif cfg["reset_sim"]:
+        _shutdown_sim_render_state()
         st.session_state.model = _new_model()
         st.session_state.step_count = 0
         st.session_state.running = False
@@ -564,3 +591,31 @@ def _discard_heatmap_future() -> None:
 def _create_metric_placeholders():
     cols = st.columns(5)
     return [col.empty() for col in cols]
+
+
+# ---------------------------------------------------------------------------
+# Room renderer lifecycle
+# ---------------------------------------------------------------------------
+
+def _ensure_sim_render_state(width: int, height: int, layout_sig: int | None) -> SimRenderer:
+    """Ensure a SimRenderer instance exists and matches current layout."""
+    sig = hash((width, height, CELL_SIZE_PX, layout_sig))
+    if st.session_state.get("sim_renderer_signature") != sig:
+        _shutdown_sim_render_state()
+        st.session_state.sim_renderer_signature = sig
+
+    renderer = st.session_state.get("sim_renderer")
+    if renderer is None:
+        renderer = SimRenderer(width, height, CELL_SIZE_PX)
+        st.session_state.sim_renderer = renderer
+    return renderer
+
+
+def _shutdown_sim_render_state() -> None:
+    renderer = st.session_state.get("sim_renderer")
+    if renderer is not None:
+        try:
+            renderer.close()
+        finally:
+            st.session_state.sim_renderer = None
+    st.session_state.sim_renderer_signature = None
