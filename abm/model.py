@@ -28,6 +28,7 @@ from constants import (
 )
 
 from abm.agents import HumanAgent, HumanStatus
+from viz.obstacle_heatmap import ExposureField
 
 
 class WaitingRoomModel:
@@ -82,6 +83,7 @@ class WaitingRoomModel:
         self._obstacles: Set[Tuple[int, int]] = set()
         self._doors: List[Tuple[int, int]] = []
         self.obstacle_heatmap = {}
+        self.exposure_field = ExposureField(self.width, self.height)
         
 
         self.humans: List[HumanAgent] = []
@@ -624,10 +626,18 @@ class WaitingRoomModel:
                         vision_polygon
                     ):
                         visible_count += 1
+                if visible_count == 0:
+                    continue
                 
                 # Weight increase: 0.2 per agent per frame
                 weight_increase = visible_count * (self.frame_dt / HEATMAP_LOOK_DURATION_S)
                 self.obstacle_heatmap[obs_cell][side_name] += weight_increase
+                self.exposure_field.record(
+                    obs_cell[0],
+                    obs_cell[1],
+                    side_name,
+                    weight_increase,
+                )
 
     def _point_in_polygon(
         self, 
