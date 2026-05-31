@@ -1,5 +1,11 @@
 """
-Modul viz/sim_plots.py
+Modul viz/sim_plots.py  [OPTIMIZED]
+
+Perubahan dari versi original:
+1. DPI render diturunkan 90 → 72 (lebih ringan, masih tajam di web)
+2. Output format PNG → JPEG quality=85 (ukuran ~40% lebih kecil)
+3. Vision polygon: skip render setiap 2 frame untuk hemat draw calls
+4. Vision patch pool: max dibatasi 60 agar tidak unbounded
 """
 
 import io
@@ -14,6 +20,11 @@ from matplotlib.patches import Rectangle, Polygon
 
 from constants import SIM_COLOR
 
+# Maksimum vision patches yang di-pool (cegah terlalu banyak patch di canvas)
+_MAX_VISION_PATCHES = 60
+# Render vision setiap N frame (1 = setiap frame, 2 = selang-seling)
+_VISION_RENDER_EVERY = 2
+
 
 class SimRenderer:
     """Kelas SimRenderer."""
@@ -22,6 +33,7 @@ class SimRenderer:
         self.width = width
         self.height = height
         self.cell_size_px = cell_size_px
+        self._frame_count = 0
 
         self.fig, self.ax = plt.subplots(figsize=(8, 6))
         self.fig.patch.set_facecolor("#0d0d1a")
@@ -37,7 +49,6 @@ class SimRenderer:
         self.ax.set_yticks([])
         self.ax.set_title("Room State", color="white", fontsize=11, fontweight="bold")
 
-        # Scatter artists untuk dynamic layer — dibuat sekali, di-update tiap frame
         s = (cell_size_px * 1.1) ** 2
         self._sc_seek: PathCollection = self.ax.scatter(
             [], [], c=SIM_COLOR["human_seek"], s=s, zorder=6,
@@ -62,19 +73,13 @@ class SimRenderer:
         )
         plt.tight_layout()
 
-        # Pool Polygon patches untuk vision cone — di-reuse antar frame
-        # agar tidak ada alokasi baru setiap render.
         self._vision_patches: list = []
-
-        # Static layer belum digambar — akan digambar saat render pertama
         self._static_drawn = False
 
     def _draw_static(self, snap: dict) -> None:
-        """Metode _draw_static."""
         cell_size_px = self.cell_size_px
 
-        def add_rect(col: int, row: int, fc: str, ec: str, alpha: float,
-                     z: int, ls: str = "solid", lw: float = 1.0) -> None:
+        def add_rect(col, row, fc, ec, alpha, z, ls="solid", lw=1.0):
             self.ax.add_patch(Rectangle(
                 (col * cell_size_px, row * cell_size_px),
                 cell_size_px, cell_size_px,
@@ -85,7 +90,6 @@ class SimRenderer:
         for col, row in snap.get("obstacles", []):
             add_rect(col, row, SIM_COLOR["obstacle"], SIM_COLOR["obstacle"], 1.0, 2)
 
-        # Chairs: gambar semua empty dulu; occupied akan di-overlay via scatter
         all_chairs = list(snap.get("chairs_empty", [])) + list(snap.get("chairs_full", []))
         for col, row in all_chairs:
             add_rect(col, row, SIM_COLOR["chair_empty"], SIM_COLOR["chair_empty"], 0.9, 3)
@@ -96,7 +100,6 @@ class SimRenderer:
         self._static_drawn = True
 
     def _update_chairs(self, snap: dict) -> None:
-        """Metode _update_chairs."""
         if not hasattr(self, "_sc_chairs_full"):
             s = (self.cell_size_px * 1.3) ** 2
             self._sc_chairs_full: PathCollection = self.ax.scatter(
@@ -113,23 +116,22 @@ class SimRenderer:
         else:
             self._sc_chairs_full.set_offsets(np.empty((0, 2)))
 
-    @staticmethod
-    def _points_to_offsets(points: List[Tuple[float, float]]):
-        if not points:
-            return []
-        return list(points)
-
     def _update_vision(self, snap: dict) -> None:
-        """Metode _update_vision."""
+        """Update vision patches — skip frame ganjil untuk hemat draw calls."""
+        # Hanya update vision setiap _VISION_RENDER_EVERY frame
+        if self._frame_count % _VISION_RENDER_EVERY != 0:
+            return
+
         vision_polygons = snap.get("humans_vision", [])
+        # Batasi jumlah vision yang dirender agar tidak overflow pool
+        vision_polygons = vision_polygons[:_MAX_VISION_PATCHES]
 
         n_needed = len(vision_polygons)
-        n_have   = len(self._vision_patches)
+        n_have = len(self._vision_patches)
 
-        # Tambah Polygon baru jika pool kurang
         for _ in range(n_needed - n_have):
             p = Polygon(
-                np.zeros((3, 2)),   # placeholder vertices
+                np.zeros((3, 2)),
                 closed=True,
                 facecolor="#ffffff",
                 edgecolor="none",
@@ -140,7 +142,6 @@ class SimRenderer:
             self.ax.add_patch(p)
             self._vision_patches.append(p)
 
-        # Update patch yang dipakai
         for i, poly_pts in enumerate(vision_polygons):
             if len(poly_pts) >= 3:
                 self._vision_patches[i].set_xy(np.array(poly_pts))
@@ -148,20 +149,20 @@ class SimRenderer:
             else:
                 self._vision_patches[i].set_visible(False)
 
-        # Sembunyikan patch yang tidak dipakai
         for i in range(n_needed, n_have):
             self._vision_patches[i].set_visible(False)
 
     def render(self, snap: dict) -> bytes:
-        """Metode render."""
+        """Render frame ke bytes — JPEG untuk ukuran lebih kecil."""
+        self._frame_count += 1
+
         if not self._static_drawn:
             self._draw_static(snap)
 
         self._update_chairs(snap)
         self._update_vision(snap)
 
-        # Update posisi agen — hanya set_offsets, tidak ada alokasi baru
-        def _upd(sc: PathCollection, points: List[Tuple[float, float]]) -> None:
+        def _upd(sc: PathCollection, points) -> None:
             if points:
                 sc.set_offsets(points)
                 sc.set_visible(True)
@@ -175,7 +176,9 @@ class SimRenderer:
         _upd(self._sc_sit,  snap.get("humans_sit",  []))
 
         buf = io.BytesIO()
-        self.fig.savefig(buf, format="png", dpi=90, bbox_inches="tight")
+        # JPEG lebih kecil dari PNG — quality=85 tidak terlihat bedanya di web
+        self.fig.savefig(buf, format="jpeg", dpi=72, bbox_inches="tight",
+                         pil_kwargs={"quality": 85, "optimize": True})
         buf.seek(0)
         return buf.getvalue()
 
@@ -188,7 +191,7 @@ class SimRenderer:
 # ---------------------------------------------------------------------------
 
 def plot_sim_room(snap: dict, width: int, height: int, cell_size_px: int) -> plt.Figure:
-    """Fungsi plot_sim_room."""
+    """Fungsi plot_sim_room — tidak berubah dari original."""
     fig, ax = plt.subplots(figsize=(8, 6))
     fig.patch.set_facecolor("#0d0d1a")
     ax.set_facecolor("#1a1a2e")
@@ -211,9 +214,9 @@ def plot_sim_room(snap: dict, width: int, height: int, cell_size_px: int) -> plt
                 linewidth=1.0, alpha=alpha, zorder=z,
             ))
 
-    draw_cells(snap.get("obstacles", []),    SIM_COLOR["obstacle"],    SIM_COLOR["obstacle"],    1.0, 2)
+    draw_cells(snap.get("obstacles",    []), SIM_COLOR["obstacle"],    SIM_COLOR["obstacle"],    1.0, 2)
     draw_cells(snap.get("chairs_empty", []), SIM_COLOR["chair_empty"], SIM_COLOR["chair_empty"], 0.9, 3)
-    draw_cells(snap.get("chairs_full", []),  SIM_COLOR["chair_full"],  SIM_COLOR["chair_full"],  1.0, 4)
+    draw_cells(snap.get("chairs_full",  []), SIM_COLOR["chair_full"],  SIM_COLOR["chair_full"],  1.0, 4)
 
     for col, row in snap.get("doors", []):
         ax.add_patch(Rectangle(
@@ -224,6 +227,7 @@ def plot_sim_room(snap: dict, width: int, height: int, cell_size_px: int) -> plt
         ))
 
     s = (cell_size_px * 1.1) ** 2
+
     def scatter_px(points, color, label, z):
         if not points:
             return

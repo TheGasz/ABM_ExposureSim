@@ -292,13 +292,25 @@ def panel_simulate(cfg: dict) -> None:
         speed_x = cfg["speed_x"]
         sim_dt = SIM_DT_S * speed_x
 
+        # --- OPTIMASI: batch beberapa step sebelum render ---
+        # Makin tinggi speed_x, makin banyak step per render frame.
+        # Ini mengurangi jumlah st.image() call yang mahal.
+        STEPS_PER_RENDER = max(1, speed_x)
+        # Metric (Step/Active/Sitting) hanya di-update setiap N render frame
+        METRIC_UPDATE_EVERY = 3
+        _render_frame = 0
+
         renderer = SimRenderer(width, height, CELL_SIZE_PX)
         try:
             while model.time_s < max_steps:
                 if not st.session_state.running:
                     break
 
-                model.step(sim_dt)
+                # Jalankan beberapa step simulasi sebelum render
+                for _ in range(STEPS_PER_RENDER):
+                    if model.time_s >= max_steps:
+                        break
+                    model.step(sim_dt)
 
                 # Sync ExposureField jika model tidak punya sendiri
                 if not hasattr(model, "exposure_field"):
@@ -309,30 +321,34 @@ def panel_simulate(cfg: dict) -> None:
                 st.session_state.step_count = step_value
 
                 snap = model.get_grid_snapshot()
-                n_now = model.count_humans()
-                n_sit = model.count_sitting()
-                n_pass = model.count_passing()
-                n_tot = model.total_customers
 
-                ph_step.metric("Step", step_value)
-                ph_active.metric("Active", n_now)
-                ph_sit.metric("Sitting", n_sit)
-                ph_pass.metric("Passing", n_pass)
-                ph_total.metric("Total Arrived", n_tot)
-
+                # Render gambar (selalu)
                 png_bytes = renderer.render(snap)
                 ph_room.image(png_bytes, use_container_width=True)
 
-                ph_info.caption(
-                    f"Time {sim_time_s:.1f}/{max_steps:.1f} s "
-                    f"· Speed {speed_x}x "
-                    f"· Active: {n_now}"
-                )
+                # Update metric hanya setiap METRIC_UPDATE_EVERY frame
+                _render_frame += 1
+                if _render_frame % METRIC_UPDATE_EVERY == 0:
+                    n_now = model.count_humans()
+                    n_sit = model.count_sitting()
+                    n_pass = model.count_passing()
+                    n_tot = model.total_customers
+
+                    ph_step.metric("Step", step_value)
+                    ph_active.metric("Active", n_now)
+                    ph_sit.metric("Sitting", n_sit)
+                    ph_pass.metric("Passing", n_pass)
+                    ph_total.metric("Total Arrived", n_tot)
+
+                    ph_info.caption(
+                        f"Time {sim_time_s:.1f}/{max_steps:.1f} s "
+                        f"· Speed {speed_x}x "
+                        f"· Active: {n_now}"
+                    )
+                    progress_bar.progress(min(sim_time_s / max_steps, 1.0))
 
                 # Heatmap di-render tiap HEATMAP_REFRESH_INTERVAL
                 render_heatmap(force=False)
-
-                progress_bar.progress(min(sim_time_s / max_steps, 1.0))
 
                 if not st.session_state.running:
                     break
