@@ -51,7 +51,7 @@ def main() -> None:
     )
 
     st.markdown(
-        "# ABM Model - Exposure Simulation"
+        "# ABM Room - Exposure Simulation"
         "<br><small style='color:#666;font-family:monospace'>"
         
         "</small>",
