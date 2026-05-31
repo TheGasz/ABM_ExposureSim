@@ -156,10 +156,10 @@ def panel_simulate(cfg: dict) -> None:
 
     col_room, col_heat = st.columns([1.2, 1], gap="medium")
     with col_room:
-        st.markdown("#### 🗺️ Room State")
+        st.markdown("####  Room State")
         ph_room = st.empty()
     with col_heat:
-        st.markdown("#### 🔥 Obstacle Heatmap")
+        st.markdown("####  Obstacle Heatmap")
         ph_hmap = st.empty()
 
     current_time = model.time_s if model is not None else 0.0
