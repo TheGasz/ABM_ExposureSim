@@ -1,7 +1,5 @@
 """
-abm/model.py
-============
-Main simulation model for the waiting room.
+Modul abm/model.py
 """
 
 import heapq
@@ -32,7 +30,7 @@ from viz.obstacle_heatmap import ExposureField
 
 
 class WaitingRoomModel:
-    """Lightweight, grid-backed model with continuous movement in pixels."""
+    """Kelas WaitingRoomModel."""
 
     def __init__(
         self,
@@ -57,15 +55,11 @@ class WaitingRoomModel:
         self.arrival_rate = max(0.0, arrival_rate)
         self.mean_sitting_s = max(1e-3, mean_sitting_s)
         self.pass_through_prob = min(max(pass_through_prob, 0.0), 1.0)
-        # Kalkulasi speed berdasarkan fps_step untuk konsistensi gerakan
         if speed_px_s is None:
-    # Agar gerakan per frame selalu konsisten di semua fps_step
-    # Dengan DEFAULT_FPSTEP=10: 10 px/s × 0.1s/frame = 1 px/frame
-    # Dengan fps_step=20: 20 px/s × 0.05s/frame = 1 px/frame
             speed_px_s = SPEED_PX_PER_S * fps_step / DEFAULT_FPSTEP
 
         self.speed_px_s = max(1e-3, speed_px_s)
-        self.frame_dt = 1.0 / float(fps_step)  # ← ADD THIS
+        self.frame_dt = 1.0 / float(fps_step)
         self.jitter = min(max(jitter, 0.0), 0.95)
         self.stuck_threshold = max(1, stuck_threshold)
 
@@ -374,9 +368,6 @@ class WaitingRoomModel:
 
         sit_duration = max(3.0, self.rng.expovariate(1.0 / self.mean_sitting_s))
         
-        # Generate random speed untuk setiap agent
-        # Normal distribution: mean = self.speed_px_s, std_dev = SPEED_VARIATION
-        # Jadi speed berkisar antara 0.6x - 1.4x dari base speed (dengan SPEED_VARIATION=0.2)
         speed_variation = self.np_rng.normal(loc=1.0, scale=SPEED_VARIATION)
         individual_speed = self.speed_px_s * max(0.5, min(2.0, speed_variation))  # Clamp 0.5x - 2.0x
 
@@ -433,14 +424,7 @@ class WaitingRoomModel:
         range_px: float = 100.0,
         num_rays: int = 32,
     ) -> List[Tuple[float, float]]:
-        """
-        Ray casting berbasis grid: tembakkan num_rays ray dalam cone
-        [facing - half_angle, facing + half_angle].  Setiap ray berhenti
-        saat menabrak sel obstacle (atau dinding luar grid).
-
-        Mengembalikan polygon (list of (x,y) pixel) yang merepresentasikan
-        area yang terlihat oleh agen — tidak menembus obstacle.
-        """
+        """Metode ray_cast_vision_polygon."""
         cs = self.cell_size_px
         ox, oy = pos_px
 

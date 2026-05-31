@@ -1,13 +1,5 @@
 """
-viz/obstacle_heatmap.py
-=======================
-Visualisasi heatmap exposure per sisi obstacle.
-
-Opsi 2 + 3:
-- Incremental exposure field: field numpy diakumulasi langsung dari model,
-  bukan di-recompute tiap frame dari obstacle_heatmap dict.
-- Render via matplotlib imshow (jauh lebih ringan dari Plotly go.Heatmap).
-- Gaussian blur via scipy.ndimage.gaussian_filter (O(n) vs O(n * points)).
+Modul viz/obstacle_heatmap.py
 """
 
 import io
@@ -40,22 +32,7 @@ PLOTLY_COLORSCALE = "Viridis"
 # ---------------------------------------------------------------------------
 
 class ExposureField:
-    """Array numpy yang terakumulasi tiap kali agen menyentuh sisi obstacle.
-
-    Cara pakai (di WaitingRoomModel):
-
-        # Inisialisasi (sekali, saat model dibuat)
-        self.exposure_field = ExposureField(width, height)
-
-        # Tiap agen lewat sisi obstacle:
-        self.exposure_field.record(col, row, side, weight=1.0)
-
-        # obstacle_heatmap dict tetap diupdate seperti biasa untuk hover info.
-
-    Di viz layer, lewatkan `model.exposure_field` ke `plot_obstacle_heatmap`.
-    Jika model tidak punya atribut tersebut (backward-compat), fungsi akan
-    fall back ke rebuild dari obstacle_heatmap dict.
-    """
+    """Kelas ExposureField."""
 
     def __init__(self, width: int, height: int) -> None:
         self.width = width
@@ -71,7 +48,7 @@ class ExposureField:
     # Side → pixel koordinat di dalam field array                         #
     # ------------------------------------------------------------------ #
     def _side_pixel(self, col: int, row: int, side: str) -> Tuple[int, int]:
-        """Kembalikan (iy, ix) dalam koordinat field array."""
+        """Metode _side_pixel."""
         s = GRID_SCALE
         xc = int((col + 0.5) * s)
         yc = int((row + 0.5) * s)
@@ -90,7 +67,7 @@ class ExposureField:
         return (min(iy, ny - 1), min(ix, nx - 1))
 
     def record(self, col: int, row: int, side: str, weight: float = 1.0) -> None:
-        """Tambahkan exposure pada satu sisi obstacle. O(1)."""
+        """Metode record."""
         iy, ix = self._side_pixel(col, row, side)
         self._field[iy, ix] += weight
         self._dirty = True
@@ -103,7 +80,7 @@ class ExposureField:
         return self._field.copy()
 
     def get_blurred(self) -> np.ndarray:
-        """Return normalized blurred field. Blur hanya dihitung ulang jika dirty."""
+        """Metode get_blurred."""
         if self._dirty or self._blurred is None:
             blurred = gaussian_filter(self._field, sigma=BLUR_SIGMA)
             max_val = blurred.max()
@@ -127,11 +104,7 @@ class ExposureField:
         width: int,
         height: int,
     ) -> "ExposureField":
-        """Bangun ExposureField dari obstacle_heatmap dict yang sudah ada.
-
-        Dipakai sebagai fallback jika model lama belum punya ExposureField.
-        Lebih lambat dari incremental, tapi jauh lebih cepat dari full meshgrid.
-        """
+        """Metode from_heatmap_dict."""
         ef = cls(width, height)
         for (col, row), sides in obstacle_heatmap.items():
             for side, weight in sides.items():
@@ -289,7 +262,7 @@ def _add_obstacle_detail_text(
 
 
 class HeatmapRenderer:
-    """Renderer matplotlib yang reuse figure agar update cepat."""
+    """Kelas HeatmapRenderer."""
 
     def __init__(self, width: int, height: int, layout: Dict[Tuple[int, int], int]) -> None:
         self.width = width
@@ -352,7 +325,7 @@ class HeatmapRenderer:
 
 
 class HeatmapRenderWorker:
-    """Worker untuk render heatmap di thread terpisah."""
+    """Kelas HeatmapRenderWorker."""
 
     def __init__(self, width: int, height: int, layout: Dict[Tuple[int, int], int]) -> None:
         self.width = width
@@ -448,26 +421,7 @@ def plot_obstacle_heatmap(
     height: int,
     exposure_field: Optional[ExposureField] = None,
 ) -> plt.Figure:
-    """Render obstacle exposure heatmap sebagai matplotlib Figure.
-
-    Parameters
-    ----------
-    obstacle_heatmap : Dict
-        {(col, row): {"top": w, "right": w, "bottom": w, "left": w}}
-        Dipakai untuk annotasi tooltip/text jika perlu, dan sebagai
-        fallback jika exposure_field tidak diberikan.
-    layout : Dict
-        Grid layout — untuk menggambar overlay obstacle.
-    width, height : int
-        Dimensi grid.
-    exposure_field : ExposureField, optional
-        Jika diberikan, field sudah terakumulasi secara incremental (cepat).
-        Jika None, di-rebuild dari obstacle_heatmap dict (fallback).
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-    """
+    """Fungsi plot_obstacle_heatmap."""
     # --- Ambil / build blurred field ---
     field = build_obstacle_heatmap_field(obstacle_heatmap, width, height, exposure_field)
 

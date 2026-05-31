@@ -1,7 +1,5 @@
 """
-abm/agents.py
-=============
-Agent definitions for the waiting room simulation.
+Modul abm/agents.py
 """
 
 import math
@@ -21,7 +19,7 @@ class HumanStatus(Enum):
 
 
 class HumanAgent:
-    """Human agent with randomized steering and simple obstacle avoidance."""
+    """Kelas HumanAgent."""
 
     def __init__(
         self,
@@ -48,13 +46,12 @@ class HumanAgent:
         self.path_idx: int = 0
         self.path_target: Optional[Tuple[int, int]] = None
         self.last_cell = model.cell_from_px(self.pos_px)
-        # Sel terakhir yang benar-benar dicapai (snap ke center).
-        # Dipakai sebagai start point saat replan agar tidak ada teleport
-        # ketika agen berada di posisi float antara dua sel.
+        # Pusat sel terakhir yang secara fisik dicapai oleh agen.
+        # Digunakan sebagai titik awal replanning untuk mencegah perpindahan mendadak (teleport).
         self.last_reached_cell: Tuple[int, int] = model.cell_from_px(self.pos_px)
         self.stuck_steps = 0
         # Arah hadap agen dalam radian (0 = kanan, pi/2 = bawah, dst).
-        # Diupdate setiap kali agen benar-benar bergerak.
+        # Diperbarui secara dinamis saat pergerakan.
         self.facing_angle_rad: float = 0.0
 
         if self.status == HumanStatus.TO_CHAIR and self.chair_cell:
@@ -63,14 +60,7 @@ class HumanAgent:
             self._plan_path(self.exit_cell)
 
     def step(self, dt: float) -> bool:
-        """
-        Advance one simulation step.
-
-        Returns
-        -------
-        bool
-            True if the agent has exited the room.
-        """
+        """Metode step."""
         if self.status == HumanStatus.TO_CHAIR:
             if not self.chair_cell:
                 start_cell = self.last_reached_cell
@@ -96,7 +86,7 @@ class HumanAgent:
             if self.sit_remaining_s <= 0:
                 if self.chair_cell:
                     self.model.release_chair(self.chair_cell, self)
-                    # Cari sel kosong di sebelah kursi untuk "berdiri" dari kursi
+                    # Mencari sel kosong terdekat dari kursi untuk proses berdiri.
                     start_cell = self._find_adjacent_walkable_cell(self.chair_cell)
                     if not start_cell:
                         start_cell = self.last_reached_cell
@@ -173,15 +163,12 @@ class HumanAgent:
             self._plan_path(self.exit_cell)
 
     def _plan_path(self, target_cell: Tuple[int, int]) -> bool:
-        # Gunakan last_reached_cell (sel yang benar-benar sudah di-snap ke
-        # center-nya) sebagai titik start, bukan cell_from_px(pos_px).
-        # Ini mencegah teleport ketika agen berada di posisi float antara
-        # dua sel saat path di-replan (misalnya di awal frame baru dengan
-        # fps_step tinggi).
+        # Menggunakan last_reached_cell sebagai titik awal menggantikan posisi float saat ini
+        # untuk mencegah artefak pergerakan instan (teleport) selama kalkulasi ulang path.
         start_cell = self.last_reached_cell
         path = self.model.find_path(start_cell, target_cell)
         if not path:
-            # Fallback: coba dari sel float saat ini
+            # Cadangan: mencoba pencarian rute dari posisi float saat ini.
             start_cell = self.model.cell_from_px(self.pos_px)
             path = self.model.find_path(start_cell, target_cell)
         if not path:
@@ -205,8 +192,8 @@ class HumanAgent:
             dist = math.hypot(dx, dy)
 
             if dist <= remaining:
-                # Agen bisa mencapai (atau melewati) center sel ini dalam dt ini.
-                # Snap ke center dan catat sebagai last_reached_cell.
+                # Agen dapat mencapai atau melewati pusat sel pada langkah waktu saat ini.
+                # Sesuaikan ke pusat sel dan catat sebagai titik tercapai.
                 if dist > 1e-9:
                     self.facing_angle_rad = math.atan2(dy, dx)
                 self.pos_px = next_px
@@ -214,20 +201,20 @@ class HumanAgent:
                 remaining -= dist
                 self.path_idx += 1
             else:
-                # Agen hanya bergerak sebagian menuju next_cell.
+                # Agen bergerak secara parsial menuju sel berikutnya.
                 ratio = remaining / dist
                 candidate = (self.pos_px[0] + dx * ratio, self.pos_px[1] + dy * ratio)
                 if self.model.is_walkable_pos(candidate, target_cell):
                     self.pos_px = candidate
                 if dist > 1e-9:
                     self.facing_angle_rad = math.atan2(dy, dx)
-                # last_reached_cell TIDAK diubah — agen belum mencapai sel baru.
+                # last_reached_cell tidak diubah hingga pusat sel baru benar-benar tercapai.
                 remaining = 0.0
 
         return self.path_idx >= len(self.path_cells)
     
     def _find_adjacent_walkable_cell(self, cell: Tuple[int, int]) -> Optional[Tuple[int, int]]:
-        """Cari sel kosong yang adjacent ke chair untuk 'standing up'."""
+        """Metode _find_adjacent_walkable_cell."""
         col, row = cell
         for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
             adjacent = (col + dx, row + dy)

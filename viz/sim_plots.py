@@ -1,12 +1,5 @@
 """
-viz/sim_plots.py
-================
-Matplotlib plots for the simulation view.
-
-Optimasi: pisahkan static layer (obstacles, chairs, doors) dari dynamic layer
-(posisi agen). Static layer di-render sekali ke background image, dynamic layer
-di-update in-place pada axes yang sama — menghindari pembuatan figure baru
-setiap frame sehingga animasi bisa berjalan lancar di fps tinggi.
+Modul viz/sim_plots.py
 """
 
 import io
@@ -23,14 +16,7 @@ from constants import SIM_COLOR
 
 
 class SimRenderer:
-    """
-    Renderer yang reuse figure/axes yang sama antar frame.
-
-    Alur:
-    1. Buat instance sekali saat simulasi dimulai.
-    2. Panggil render(snap) setiap frame → kembalikan PNG bytes.
-    3. Tampilkan dengan st.image(bytes, ...) — lebih cepat dari st.pyplot.
-    """
+    """Kelas SimRenderer."""
 
     def __init__(self, width: int, height: int, cell_size_px: int) -> None:
         self.width = width
@@ -84,7 +70,7 @@ class SimRenderer:
         self._static_drawn = False
 
     def _draw_static(self, snap: dict) -> None:
-        """Gambar obstacles, chairs, doors — hanya sekali per instance."""
+        """Metode _draw_static."""
         cell_size_px = self.cell_size_px
 
         def add_rect(col: int, row: int, fc: str, ec: str, alpha: float,
@@ -110,11 +96,7 @@ class SimRenderer:
         self._static_drawn = True
 
     def _update_chairs(self, snap: dict) -> None:
-        """Update warna chair full/empty dengan menggambar ulang hanya patch kursi."""
-        # Hapus patch kursi lama (zorder 3 dan 4), gambar ulang
-        # Lebih mudah: simpan referensi patch kursi dan update facecolor-nya.
-        # Untuk simplisitas, gunakan scatter overlay untuk chairs_full.
-        # Chair penuh ditampilkan via scatter terpisah (zorder 4).
+        """Metode _update_chairs."""
         if not hasattr(self, "_sc_chairs_full"):
             s = (self.cell_size_px * 1.3) ** 2
             self._sc_chairs_full: PathCollection = self.ax.scatter(
@@ -138,11 +120,7 @@ class SimRenderer:
         return list(points)
 
     def _update_vision(self, snap: dict) -> None:
-        """Update polygon vision setiap agen bergerak. Reuse patch pool.
-
-        humans_vision sekarang berformat List[List[Tuple[float,float]]]:
-        satu polygon (sudah di-ray-cast, obstacle-aware) per agen.
-        """
+        """Metode _update_vision."""
         vision_polygons = snap.get("humans_vision", [])
 
         n_needed = len(vision_polygons)
@@ -175,10 +153,7 @@ class SimRenderer:
             self._vision_patches[i].set_visible(False)
 
     def render(self, snap: dict) -> bytes:
-        """
-        Update dynamic layer dan kembalikan PNG sebagai bytes.
-        Jauh lebih cepat dari membuat figure baru setiap frame.
-        """
+        """Metode render."""
         if not self._static_drawn:
             self._draw_static(snap)
 
@@ -213,7 +188,7 @@ class SimRenderer:
 # ---------------------------------------------------------------------------
 
 def plot_sim_room(snap: dict, width: int, height: int, cell_size_px: int) -> plt.Figure:
-    """Buat figure baru sekali pakai. Gunakan SimRenderer untuk animasi."""
+    """Fungsi plot_sim_room."""
     fig, ax = plt.subplots(figsize=(8, 6))
     fig.patch.set_facecolor("#0d0d1a")
     ax.set_facecolor("#1a1a2e")

@@ -1,15 +1,5 @@
 """
-ui/panel_simulate.py
-====================
-Simulation panel for running the ABM and visualizing movement.
-
-Perubahan vs versi lama:
-- Heatmap live render via matplotlib (PNG) dan di-cache di session_state.
-- Heatmap final memakai Plotly interaktif dengan hover detail per obstacle.
-- ExposureField dipakai sebagai incremental accumulator; diinit ulang tiap
-    Start/Reset agar field tidak rebuild tiap step.
-- render_heatmap() offload ke thread worker dan update via placeholder image.
-- Interval refresh heatmap saat live: HEATMAP_REFRESH_INTERVAL detik sim-time.
+Modul ui/panel_simulate.py
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -199,14 +189,7 @@ def panel_simulate(cfg: dict) -> None:
     # ------------------------------------------------------------------ #
 
     def render_heatmap(force: bool = False, show_details: bool = False) -> None:
-        """Render heatmap ke ph_hmap.
-
-        Hanya rebuild Figure jika:
-        - force=True (misal: setelah simulasi selesai), atau
-        - sudah lewat HEATMAP_REFRESH_INTERVAL sejak render terakhir.
-
-        Rendering di-offload ke worker dan hasil PNG di-cache.
-        """
+        """Fungsi render_heatmap."""
         if show_details:
             _discard_heatmap_future()
             source_ef = getattr(model, "exposure_field", None)
@@ -482,15 +465,7 @@ def _sync_exposure_field(
     ef: ExposureField,
     obstacle_heatmap: dict,
 ) -> None:
-    """Update ExposureField dari seluruh obstacle_heatmap dict.
-
-    Ini adalah fallback O(obstacles) yang dipanggil tiap step jika model
-    tidak punya ExposureField internal sendiri.
-
-    Catatan: metode ini me-reset dan rebuild ulang field dari dict — artinya
-    masih O(obstacles * sides) per step. Untuk performa optimal, integrasikan
-    ExposureField.record() langsung ke WaitingRoomModel.step().
-    """
+    """Menyinkronkan status objek ExposureField dari struktur data dictionary obstacle_heatmap."""
     ef.reset()
     for (col, row), sides in obstacle_heatmap.items():
         for side, weight in sides.items():
