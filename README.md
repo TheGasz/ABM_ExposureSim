@@ -1,4 +1,4 @@
-# ABM Waiting Room - Random Movement Simulation 
+# ABM Model - Optimization Exposure in Design Room  
 
 Welcome to the **Waiting Room Agent-Based Model (ABM) Simulation**! This project is an interactive, web-based simulation built with Streamlit. It allows you to design a waiting room layout and simulate the behavior of human agents as they navigate the space, look for chairs, sit down, and exit.
 
