@@ -51,9 +51,9 @@ def main() -> None:
     )
 
     st.markdown(
-        "# ABM Waiting Room - Random Movement"
+        "# ABM Model - Exposure Simulation"
         "<br><small style='color:#666;font-family:monospace'>"
-        "v3 - Randomized motion - 1 m = 10 px"
+        
         "</small>",
         unsafe_allow_html=True,
     )
