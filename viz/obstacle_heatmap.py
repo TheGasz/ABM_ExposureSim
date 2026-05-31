@@ -308,7 +308,7 @@ class HeatmapRenderer:
         for spine in self.ax.spines.values():
             spine.set_edgecolor("#333355")
 
-        self.ax.set_title("🔥 Obstacle Exposure Heatmap", color="white", fontsize=9,
+        self.ax.set_title(" Obstacle Exposure Heatmap", color="white", fontsize=9,
                           fontfamily="monospace", loc="left", pad=6)
 
         self.fig.tight_layout(pad=0.4)
