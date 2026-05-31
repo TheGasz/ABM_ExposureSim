@@ -4,11 +4,11 @@ Welcome to the **Waiting Room Agent-Based Model (ABM) Simulation**! This project
 
 ## ✨ Features
 
-- * Interactive Room Design*: Use the **Design Room** tab to place obstacles, doors, and chairs on a customizable grid. You can rotate chairs and build complex layouts.
-- * Agent-Based Simulation*: Agents arrive dynamically (Poisson distribution) and make decisions based on configurable probabilities (e.g., pass-through vs. sitting).
-- * Ray Casting Vision*: Agents are equipped with a field of view (cone of vision). Using ray casting algorithms, the simulation calculates exactly what each agent sees.
-- * Focused Agent Mode*: Isolate a single agent to observe their exact vision cone and ray hit points in real-time.
-- * Obstacle Heatmap*: The simulation tracks which obstacles are observed the most and generates a dynamic heatmap. At the end of the simulation, explore a highly detailed interactive Plotly heatmap.
+-**Interactive Room Design**: Use the **Design Room** tab to place obstacles, doors, and chairs on a customizable grid. You can rotate chairs and build complex layouts.
+- **Agent Based-Simulation**: Agents arrive dynamically (Poisson distribution) and make decisions based on configurable probabilities (e.g., pass-through vs. sitting).
+-**Ray-casting Vision**: Agents are equipped with a field of view (cone of vision). Using ray casting algorithms, the simulation calculates exactly what each agent sees.
+- **Focused Agent Mode**: Isolate a single agent to observe their exact vision cone and ray hit points in real-time.
+- **Obstacle Heatmap**: The simulation tracks which obstacles are observed the most and generates a dynamic heatmap. At the end of the simulation, explore a highly detailed interactive Plotly heatmap.
 
 ## 🛠️ Tech Stack
 
