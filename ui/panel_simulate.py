@@ -39,45 +39,87 @@ def build_sidebar_sim() -> dict:
         )
         st.divider()
 
-        st.subheader("Arrivals")
+        def synced_slider(label, min_val, max_val, default_val, step, key_prefix, help_text=""):
+            slider_key = f"{key_prefix}_slider"
+            num_key = f"{key_prefix}_num"
+
+            if slider_key not in st.session_state:
+                st.session_state[slider_key] = default_val
+            if num_key not in st.session_state:
+                st.session_state[num_key] = default_val
+
+            def sync_slider():
+                st.session_state[num_key] = st.session_state[slider_key]
+
+            def sync_num():
+                st.session_state[slider_key] = st.session_state[num_key]
+
+            st.markdown(f"**{label}**", help=help_text if help_text else None)
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.slider(
+                    label,
+                    min_value=min_val,
+                    max_value=max_val,
+                    step=step,
+                    key=slider_key,
+                    on_change=sync_slider,
+                    label_visibility="collapsed"
+                )
+            with col2:
+                st.number_input(
+                    label,
+                    min_value=min_val,
+                    max_value=max_val,
+                    step=step,
+                    key=num_key,
+                    on_change=sync_num,
+                    label_visibility="collapsed"
+                )
+            return st.session_state[slider_key]
+
         sim_defaults = st.session_state.get("sim_config", {})
-        arrival_rate = st.slider(
+
+        st.subheader("Arrivals")
+        arrival_rate = synced_slider(
             "Lambda (people/sec)",
             0.05,
             3.0,
             float(sim_defaults.get("arrival_rate", 0.6)),
             0.05,
-            help="Arrivals per second, sampled using Poisson distribution",
+            "cfg_arr",
+            help_text="Arrivals per second, sampled using Poisson distribution"
         )
 
         st.subheader("Human Behavior")
-        mean_sitting = st.slider(
+        mean_sitting = synced_slider(
             "Average sitting time (sec)",
             5,
             180,
             int(sim_defaults.get("mean_sitting", 20)),
-            help="Sitting time follows an exponential distribution",
+            1,
+            "cfg_sit",
+            help_text="Sitting time follows an exponential distribution"
         )
-        pass_prob = st.slider(
+        pass_prob = synced_slider(
             "Pass-through probability",
             0.0,
             1.0,
             float(sim_defaults.get("pass_through_prob", 0.5)),
             0.05,
-            help="Chance to pass through without sitting",
+            "cfg_pass",
+            help_text="Chance to pass through without sitting"
         )
 
         st.subheader("Playback")
-        speed_x = st.select_slider(
-            "Simulation Speed",
-            options=list(range(MIN_SPEED, MAX_SPEED + 1)),
-            value=int(sim_defaults.get("speed_x", 1)),
-            format_func=lambda v: f"{v}×",
-            help=(
-                "Kecepatan simulasi. Waktu simulasi melompat lebih besar "
-                "per update, FPS menyesuaikan performa. "
-                "5× berarti 200 step selesai 5× lebih cepat dari 1×."
-            ),
+        speed_x = synced_slider(
+            "Simulation Speed (x)",
+            MIN_SPEED,
+            MAX_SPEED,
+            int(sim_defaults.get("speed_x", 1)),
+            1,
+            "cfg_speed",
+            help_text="Kecepatan simulasi. Waktu simulasi melompat lebih besar per update. 5x berarti lebih cepat 5x dari 1x."
         )
 
         base_dt = SIM_DT_S
@@ -162,6 +204,10 @@ def panel_simulate(cfg: dict) -> None:
         st.markdown("####  Obstacle Heatmap")
         ph_hmap = st.empty()
 
+    st.markdown("####  Population Analysis (Over Time)")
+    ph_chart = st.empty()
+    ph_csv = st.empty()
+
     current_time = model.time_s if model is not None else 0.0
     progress_bar = st.progress(min(current_time / max(max_steps, 1.0), 1.0))
     ph_info = st.empty()
@@ -185,8 +231,39 @@ def panel_simulate(cfg: dict) -> None:
     ef: ExposureField = st.session_state.exposure_field
 
     # ------------------------------------------------------------------ #
-    # Helper render heatmap                                                #
+    # Helper render heatmap & chart                                        #
     # ------------------------------------------------------------------ #
+
+    def render_chart(force: bool = False) -> None:
+        if not hasattr(model, "history") or len(model.history) == 0:
+            return
+        last_render = st.session_state.get("chart_cache_time", -1.0)
+        elapsed = model.time_s - last_render
+        if not force and elapsed < HEATMAP_REFRESH_INTERVAL:
+            return
+        
+        import pandas as pd
+        df = pd.DataFrame(model.history)
+        df_chart = df.set_index("Time (s)")
+        # Make a beautiful plotly line chart for Streamlit or use st.line_chart
+        ph_chart.line_chart(df_chart, color=["#f5a623", "#00b894", "#0984e3"])
+        
+        # Add CSV download button
+        df_csv = df.rename(columns={
+            "Time (s)": "t",
+            "Active": "jumlah arrival",
+            "Sitting": "jumlah sitting",
+            "Passing": "passing"
+        })
+        csv_data = df_csv.to_csv(index=False).encode('utf-8')
+        ph_csv.download_button(
+            label="Download CSV Data",
+            data=csv_data,
+            file_name="population_analysis.csv",
+            mime="text/csv",
+            key=f"dl_csv_{model.time_s}" # Unique key to prevent Streamlit duplicate key error if called multiple times, but actually we don't need a dynamic key if we use a placeholder. Wait, let's not use dynamic key to avoid issues.
+        )
+        st.session_state.chart_cache_time = model.time_s
 
     def render_heatmap(force: bool = False, show_details: bool = False) -> None:
         """Fungsi render_heatmap."""
@@ -282,6 +359,8 @@ def panel_simulate(cfg: dict) -> None:
         fig_room = plot_sim_room(snap, width, height, CELL_SIZE_PX)
         ph_room.pyplot(fig_room)
         plt.close(fig_room)
+        
+        render_chart(force=True)
         return n_now
 
     # ================================================================== #
@@ -331,6 +410,7 @@ def panel_simulate(cfg: dict) -> None:
 
                 # Heatmap di-render tiap HEATMAP_REFRESH_INTERVAL
                 render_heatmap(force=False)
+                render_chart(force=False)
 
                 progress_bar.progress(min(sim_time_s / max_steps, 1.0))
 
@@ -343,6 +423,7 @@ def panel_simulate(cfg: dict) -> None:
         st.session_state.running = False
         progress_bar.progress(1.0)
         render_heatmap(force=True, show_details=model.time_s >= max_steps)
+        render_chart(force=True)
         ph_info.success(
             f"Simulation finished at {int(model.time_s)} s. "
             f"Total arrivals: {model.total_customers}."
@@ -411,6 +492,7 @@ def _handle_controls(cfg, width, height, layout):
         st.session_state.heatmap_png_cache = None
         st.session_state.heatmap_plotly_cache = None
         st.session_state.heatmap_plotly_version = -1
+        st.session_state.chart_cache_time = -1.0
         _shutdown_heatmap_render_state()
 
     is_paused = st.session_state.get("paused", False)

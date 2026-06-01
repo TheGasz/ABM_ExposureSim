@@ -66,6 +66,7 @@ class WaitingRoomModel:
         self.current_step = 0
         self.time_s = 0.0
         self.total_customers = 0
+        self.history: List[Dict[str, float]] = []
 
         self.rng = random.Random(seed)
         self.np_rng = np.random.default_rng(seed)
@@ -411,6 +412,14 @@ class WaitingRoomModel:
         # Update heatmap berdasarkan vision agents
         snap = self.get_grid_snapshot()
         self.update_obstacle_heatmap(snap["humans_vision"])
+        
+        # Record history for analysis (every step as requested)
+        self.history.append({
+            "Time (s)": round(self.time_s, 3),
+            "Active": self.count_humans(),
+            "Sitting": self.count_sitting(),
+            "Passing": self.count_passing()
+        })
 
     # ------------------------------------------------------------------
     # Vision / Ray casting
